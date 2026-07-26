@@ -19,12 +19,13 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use algebra::{
     AdemAlgebra, Algebra, GeneratedAlgebra,
-    module::{FDModule, Module},
+    module::{FDModule, Module, TensorModule},
     steenrod_evaluator::SteenrodEvaluator,
 };
 use anyhow::{Context, anyhow, bail, ensure};
 use bivec::BiVec;
 use fp::{
+    matrix::Subspace,
     prime::{Prime, ValidPrime},
     vector::FpVector,
 };
@@ -601,6 +602,399 @@ impl Builder {
         (module, failures)
     }
 
+    // ----------------------------------------------------------- operations
+
+    /// Replace the module with `module`, keeping nothing but the prime.
+    ///
+    /// Every field of `extra` is dropped. `cofiber`, `products` and `self_maps` describe the module
+    /// they were written for, so carrying them across an operation would silently attach a false
+    /// claim — the cofibre spec of `M` says nothing about `M^\vee` or `M (x) N`.
+    fn replace_with(&mut self, module: &FDModule<AdemAlgebra>, name: String) {
+        let rebuilt = Self::from_fd_module(self.p, module, name);
+        self.name = rebuilt.name;
+        self.gens = rebuilt.gens;
+        self.actions = rebuilt.actions;
+        self.extra = Map::new();
+        self.normalize();
+    }
+
+    /// Read an [`FDModule`] into a builder, cleaning up its basis element names.
+    ///
+    /// Names come from `basis_element_to_string`, which for a tensor product gives things like
+    /// `x0.y0`. Anything the `actions` grammar could not represent is replaced rather than trusted.
+    fn from_fd_module(p: ValidPrime, module: &FDModule<AdemAlgebra>, name: String) -> Self {
+        let mut builder = Self::new(p);
+        builder.name = name;
+
+        let min_degree = module.min_degree();
+        if let Some(top_degree) = module.max_degree() {
+            for degree in min_degree..=top_degree {
+                for idx in 0..module.dimension(degree) {
+                    let raw = module.basis_element_to_string(degree, idx);
+                    let cleaned = clean_name(&raw);
+                    let chosen = match cleaned {
+                        Some(cleaned) if !builder.name_exists(&cleaned) => cleaned,
+                        // Either unusable or already taken, so fall back to a generated name.
+                        _ => builder.default_name(degree),
+                    };
+                    builder
+                        .add_generator(degree, Some(&chosen))
+                        .expect("a cleaned, unused name is valid");
+                }
+            }
+        }
+        builder.harvest(module);
+        builder
+    }
+
+    /// Refuse an operation on a module we cannot reason about.
+    fn require_unrestricted(&self, operation: &str) -> anyhow::Result<()> {
+        match self.restriction() {
+            None => Ok(()),
+            Some(reason) => Err(anyhow!(
+                "Cannot {operation}: this module is not a module over the full Steenrod algebra. \
+                 {reason}"
+            )),
+        }
+    }
+
+    /// Shift every degree by `by`, i.e. form $\Sigma^{by} M$.
+    ///
+    /// This needs no rebuild: actions are stored against generator names, and suspension changes only
+    /// the grading.
+    pub fn shift(&mut self, by: i32) {
+        if by == 0 || self.is_zero() {
+            return;
+        }
+        let min_degree = self.min_degree() + by;
+        let mut shifted = BiVec::with_capacity(min_degree, self.top_degree() + by + 1);
+        for names in self.gens.iter() {
+            shifted.push(names.clone());
+        }
+        self.gens = shifted;
+    }
+
+    /// Replace the module by its dual $M^\vee$, with $(M^\vee)_{-n} = (M_n)^*$.
+    pub fn dual(&mut self) -> anyhow::Result<()> {
+        self.require_unrestricted("dualise")?;
+        let (module, _) = self.build();
+        let dual = module.dual();
+        let name = decorate_name(&self.name, |name| format!("{name}^*"));
+        self.replace_with(&dual, name);
+        Ok(())
+    }
+
+    /// Keep only the cells whose degree lies in the given range.
+    ///
+    /// Both halves are automatically modules: the Steenrod algebra raises degree, so discarding
+    /// everything above a degree gives a quotient module and discarding everything below gives a
+    /// submodule. Neither can break a relation that held before.
+    pub fn truncate(&mut self, min: Option<i32>, max: Option<i32>) -> anyhow::Result<()> {
+        if let (Some(min), Some(max)) = (min, max) {
+            ensure!(
+                min <= max,
+                "The lower bound {min} is above the upper bound {max}"
+            );
+        }
+        let doomed: Vec<String> = self
+            .gens
+            .iter_enum()
+            .filter(|(degree, _)| {
+                min.is_some_and(|min| *degree < min) || max.is_some_and(|max| *degree > max)
+            })
+            .flat_map(|(_, names)| names.iter().cloned())
+            .collect();
+        for name in doomed {
+            let (degree, idx) = self.lookup(&name).expect("just listed");
+            self.remove_generator(degree, idx)?;
+        }
+        Ok(())
+    }
+
+    /// Replace the module by $M \oplus N$.
+    pub fn direct_sum(&mut self, other: &Self) -> anyhow::Result<()> {
+        ensure!(
+            self.p == other.p,
+            "Cannot add a module at the prime {} to one at the prime {}",
+            other.p,
+            self.p
+        );
+        self.require_unrestricted("form a direct sum")?;
+        other.require_unrestricted("form a direct sum")?;
+
+        // Rename the summand's basis elements where they collide, and carry the renaming into its
+        // actions, which are keyed by name.
+        let mut renaming: BTreeMap<&str, String> = BTreeMap::new();
+        for (degree, names) in other.gens.iter_enum() {
+            for name in names {
+                let chosen = if self.name_exists(name) {
+                    (1..)
+                        .map(|i| format!("{name}_{i}"))
+                        .find(|candidate| {
+                            !self.name_exists(candidate)
+                                && !renaming.values().any(|taken| taken == candidate)
+                        })
+                        .expect("the range 1.. is infinite")
+                } else {
+                    name.clone()
+                };
+                renaming.insert(name.as_str(), chosen.clone());
+                self.add_generator(degree, Some(&chosen))?;
+            }
+        }
+        for ((op_degree, source), targets) in &other.actions {
+            let source = renaming[source.as_str()].clone();
+            let targets = targets
+                .iter()
+                .map(|(coeff, target)| (*coeff, renaming[target.as_str()].clone()))
+                .collect();
+            self.actions.insert((*op_degree, source), targets);
+        }
+
+        self.extra = Map::new();
+        self.name = combine_names(&self.name, &other.name, " + ");
+        self.normalize();
+        Ok(())
+    }
+
+    /// Replace the module by $M \otimes N$.
+    pub fn tensor(&mut self, other: &Self) -> anyhow::Result<()> {
+        ensure!(
+            self.p == other.p,
+            "Cannot tensor a module at the prime {} with one at the prime {}",
+            self.p,
+            other.p
+        );
+        self.require_unrestricted("tensor")?;
+        other.require_unrestricted("tensor")?;
+
+        let (left, _) = self.build();
+        let (right, _) = other.build();
+        if left.max_degree().is_none() || right.max_degree().is_none() {
+            bail!("Both factors must be finite dimensional");
+        }
+        let name = combine_names(&self.name, &other.name, " (x) ");
+        let tensor = FDModule::from(&TensorModule::new(Arc::new(left), Arc::new(right)));
+        self.replace_with(&tensor, name);
+        Ok(())
+    }
+
+    /// Replace the module by the submodule generated by the given basis elements.
+    pub fn submodule(&mut self, cells: &[(i32, usize)]) -> anyhow::Result<()> {
+        self.require_unrestricted("take a submodule")?;
+        let (module, _) = self.build();
+        let subspaces = self.generated_subspaces(&module, cells)?;
+
+        let min_degree = self.min_degree();
+        let top_degree = self.top_degree();
+        let mut graded_dimension = BiVec::with_capacity(min_degree, top_degree + 1);
+        for degree in min_degree..=top_degree {
+            graded_dimension.push(subspaces[degree].dimension());
+        }
+        let mut sub = FDModule::new(
+            Arc::clone(&self.algebra),
+            String::new(),
+            graded_dimension.clone(),
+        );
+
+        // Name a basis vector after the original cell when it is one, which is the common case and
+        // keeps the result readable.
+        for degree in min_degree..=top_degree {
+            for (idx, row) in subspaces[degree].basis().enumerate() {
+                let name = match row.first_nonzero() {
+                    Some((entry, 1)) if row.iter_nonzero().count() == 1 => {
+                        self.gens[degree][entry].clone()
+                    }
+                    _ => format!("v{}_{idx}", degree_suffix(degree)),
+                };
+                sub.set_basis_element_name(degree, idx, name);
+            }
+        }
+
+        // The action, expressed in the echelon basis. Because the subspace's matrix is row reduced,
+        // the coefficient of a vector on basis row `i` is simply its entry in that row's pivot column.
+        let p = self.p;
+        for input_degree in min_degree..=top_degree {
+            let pivots_in: Vec<usize> = pivot_columns(&subspaces[input_degree]);
+            for output_degree in (input_degree + 1)..=top_degree {
+                let op_degree = output_degree - input_degree;
+                let pivots_out = pivot_columns(&subspaces[output_degree]);
+                if pivots_out.is_empty() || pivots_in.is_empty() {
+                    continue;
+                }
+                self.algebra.compute_basis(op_degree);
+                let mut image = FpVector::new(p, module.dimension(output_degree));
+                for op_idx in 0..self.algebra.dimension(op_degree) {
+                    for (input_idx, row) in subspaces[input_degree].basis().enumerate() {
+                        image.set_to_zero();
+                        module.act(
+                            image.as_slice_mut(),
+                            1,
+                            op_degree,
+                            op_idx,
+                            input_degree,
+                            row,
+                        );
+                        let target = sub.action_mut(op_degree, op_idx, input_degree, input_idx);
+                        for (output_idx, &column) in pivots_out.iter().enumerate() {
+                            let value = image.entry(column);
+                            if value != 0 {
+                                target.add_basis_element(output_idx, value);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let name = decorate_name(&self.name, |name| format!("sub({name})"));
+        self.replace_with(&sub, name);
+        Ok(())
+    }
+
+    /// Replace the module by the quotient by the submodule generated by the given basis elements.
+    pub fn quotient(&mut self, cells: &[(i32, usize)]) -> anyhow::Result<()> {
+        self.require_unrestricted("take a quotient")?;
+        let (module, _) = self.build();
+        let subspaces = self.generated_subspaces(&module, cells)?;
+
+        let min_degree = self.min_degree();
+        let top_degree = self.top_degree();
+        // The quotient is spanned by the basis elements that are not pivots of the subspace, exactly
+        // as `QuotientModule` does it.
+        let surviving: BiVec<Vec<usize>> = {
+            let mut surviving = BiVec::with_capacity(min_degree, top_degree + 1);
+            for degree in min_degree..=top_degree {
+                let pivots = subspaces[degree].pivots();
+                surviving.push(
+                    (0..module.dimension(degree))
+                        .filter(|&column| pivots[column] < 0)
+                        .collect(),
+                );
+            }
+            surviving
+        };
+
+        let mut graded_dimension = BiVec::with_capacity(min_degree, top_degree + 1);
+        for degree in min_degree..=top_degree {
+            graded_dimension.push(surviving[degree].len());
+        }
+        let mut quotient =
+            FDModule::new(Arc::clone(&self.algebra), String::new(), graded_dimension);
+        for degree in min_degree..=top_degree {
+            for (idx, &column) in surviving[degree].iter().enumerate() {
+                quotient.set_basis_element_name(degree, idx, self.gens[degree][column].clone());
+            }
+        }
+
+        let p = self.p;
+        for input_degree in min_degree..=top_degree {
+            if surviving[input_degree].is_empty() {
+                continue;
+            }
+            for output_degree in (input_degree + 1)..=top_degree {
+                if surviving[output_degree].is_empty() {
+                    continue;
+                }
+                let op_degree = output_degree - input_degree;
+                self.algebra.compute_basis(op_degree);
+                let mut image = FpVector::new(p, module.dimension(output_degree));
+                for op_idx in 0..self.algebra.dimension(op_degree) {
+                    for (input_idx, &column) in surviving[input_degree].iter().enumerate() {
+                        image.set_to_zero();
+                        module.act_on_basis(
+                            image.as_slice_mut(),
+                            1,
+                            op_degree,
+                            op_idx,
+                            input_degree,
+                            column,
+                        );
+                        // Reducing modulo the submodule zeroes the pivot entries, leaving a vector
+                        // supported on the surviving columns.
+                        subspaces[output_degree].reduce(image.as_slice_mut());
+                        let target =
+                            quotient.action_mut(op_degree, op_idx, input_degree, input_idx);
+                        for (output_idx, &out_column) in surviving[output_degree].iter().enumerate()
+                        {
+                            let value = image.entry(out_column);
+                            if value != 0 {
+                                target.add_basis_element(output_idx, value);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let name = decorate_name(&self.name, |name| format!("{name}/sub"));
+        self.replace_with(&quotient, name);
+        Ok(())
+    }
+
+    /// The subspace of each degree spanned by the submodule generated by `cells`.
+    ///
+    /// A single increasing pass over the degrees suffices: the algebra raises degree, so by the time
+    /// a degree is processed every contribution to it has already been added.
+    fn generated_subspaces(
+        &self,
+        module: &FDModule<AdemAlgebra>,
+        cells: &[(i32, usize)],
+    ) -> anyhow::Result<BiVec<Subspace>> {
+        ensure!(!cells.is_empty(), "Select at least one basis element first");
+        ensure!(!self.is_zero(), "The zero module has no basis elements");
+
+        let p = self.p;
+        let min_degree = self.min_degree();
+        let top_degree = self.top_degree();
+
+        let mut subspaces = BiVec::with_capacity(min_degree, top_degree + 1);
+        for degree in min_degree..=top_degree {
+            subspaces.push(Subspace::new(p, module.dimension(degree)));
+        }
+
+        for &(degree, idx) in cells {
+            self.require(degree, idx)?;
+            let mut seed = FpVector::new(p, module.dimension(degree));
+            seed.set_entry(idx, 1);
+            subspaces[degree].add_vector(seed.as_slice());
+        }
+
+        for degree in min_degree..=top_degree {
+            let generators: Vec<FpVector> = subspaces[degree]
+                .basis()
+                .map(|row| row.to_owned())
+                .collect();
+            if generators.is_empty() {
+                continue;
+            }
+            for op_degree in 1..=(top_degree - degree) {
+                self.algebra.compute_basis(op_degree);
+                let output_degree = degree + op_degree;
+                if module.dimension(output_degree) == 0 {
+                    continue;
+                }
+                for op_idx in 0..self.algebra.dimension(op_degree) {
+                    for vector in &generators {
+                        let mut image = FpVector::new(p, module.dimension(output_degree));
+                        module.act(
+                            image.as_slice_mut(),
+                            1,
+                            op_degree,
+                            op_idx,
+                            degree,
+                            vector.as_slice(),
+                        );
+                        if !image.is_zero() {
+                            subspaces[output_degree].add_vector(image.as_slice());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(subspaces)
+    }
+
     // -------------------------------------------------------- serialised state
 
     /// The module as json, in exactly the format used by `ext/steenrod_modules`.
@@ -868,6 +1262,57 @@ fn split_terms(expr: &str) -> anyhow::Result<Vec<(&str, &str)>> {
 /// Anything else is allowed. In particular `*` is permitted, because the library uses
 /// tensor-product names such as `x0*x0` in `ext/steenrod_modules/C2_sm_Ceta.json`, and a name we
 /// reject is a file we could not load.
+/// The columns that are pivots of a row-reduced subspace, in row order.
+///
+/// Row `i` of the subspace's matrix has its leading entry in `pivot_columns(space)[i]`, so the
+/// coefficient of a vector of the subspace on basis row `i` is its entry in that column.
+fn pivot_columns(space: &Subspace) -> Vec<usize> {
+    let pivots = space.pivots();
+    let mut columns = vec![0; space.dimension()];
+    for (column, &row) in pivots.iter().enumerate() {
+        if row >= 0 {
+            columns[row as usize] = column;
+        }
+    }
+    columns
+}
+
+/// A degree as it appears in a generated name, with `-` replaced so the result is an identifier.
+fn degree_suffix(degree: i32) -> String {
+    if degree < 0 {
+        format!("_{}", -degree)
+    } else {
+        degree.to_string()
+    }
+}
+
+/// Apply `f` to a non-empty name, leaving an unnamed module unnamed.
+fn decorate_name(name: &str, f: impl FnOnce(&str) -> String) -> String {
+    if name.trim().is_empty() {
+        String::new()
+    } else {
+        f(name)
+    }
+}
+
+/// Join two module names, or give up if either is missing.
+fn combine_names(left: &str, right: &str, separator: &str) -> String {
+    if left.trim().is_empty() || right.trim().is_empty() {
+        String::new()
+    } else {
+        format!("{left}{separator}{right}")
+    }
+}
+
+/// Make a name from another module usable, or return `None` if nothing sensible survives.
+fn clean_name(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '+' && *c != '=')
+        .collect();
+    validate_name(&cleaned).ok().map(|()| cleaned)
+}
+
 fn validate_name(name: &str) -> anyhow::Result<()> {
     let first = name
         .chars()
@@ -1242,6 +1687,306 @@ mod tests {
         // Coefficients are reduced mod p, and p times anything is no action at all.
         builder.set_action(1, 0, 0, &[3]).unwrap();
         assert_eq!(builder.to_json()["actions"], json!([]));
+    }
+
+    // ----------------------------------------------------------- operations
+
+    fn c2() -> Value {
+        json!({
+            "p": 2,
+            "type": "finite dimensional module",
+            "gens": { "x0": 0, "x1": 1 },
+            "actions": ["Sq1 x0 = x1"],
+        })
+    }
+
+    fn ceta() -> Value {
+        json!({
+            "p": 2,
+            "type": "finite dimensional module",
+            "gens": { "x0": 0, "x2": 2 },
+            "actions": ["Sq2 x0 = x2"],
+        })
+    }
+
+    fn assert_valid(builder: &Builder) {
+        let (_, failures) = builder.build();
+        assert!(failures.is_empty(), "relations fail: {failures:?}");
+    }
+
+    #[test]
+    fn shift_regrades_without_touching_actions() {
+        let mut builder = Builder::from_json(&joker()).unwrap();
+        builder.shift(-4);
+        assert_eq!(builder.min_degree(), -4);
+        assert_eq!(builder.top_degree(), 0);
+        assert_valid(&builder);
+
+        let json = builder.to_json();
+        assert_eq!(json["gens"]["x0"], json!(-4));
+        assert_eq!(json["gens"]["x4"], json!(0));
+        // The actions are stored against names, so suspension leaves them alone.
+        assert_eq!(
+            json["actions"],
+            Builder::from_json(&joker()).unwrap().to_json()["actions"]
+        );
+
+        builder.shift(4);
+        assert_eq!(
+            builder.to_json(),
+            Builder::from_json(&joker()).unwrap().to_json()
+        );
+    }
+
+    #[test]
+    fn dual_of_c2() {
+        let mut builder = Builder::from_json(&c2()).unwrap();
+        builder.dual().unwrap();
+        assert_valid(&builder);
+
+        let json = builder.to_json();
+        assert_eq!(json["gens"], json!({ "x1": -1, "x0": 0 }));
+        assert_eq!(json["actions"], json!(["Sq1 x1 = x0"]));
+    }
+
+    /// Dualising twice must return the original module, including at odd primes where the antipode
+    /// carries signs.
+    #[test]
+    fn double_dual_round_trips() {
+        for spec in [c2(), joker(), ceta()] {
+            let original = Builder::from_json(&spec).unwrap();
+            let mut builder = Builder::from_json(&spec).unwrap();
+            builder.dual().unwrap();
+            builder.dual().unwrap();
+            assert_valid(&builder);
+            let (rebuilt, _) = builder.build();
+            let (expected, _) = original.build();
+            rebuilt.test_equal(&expected).unwrap();
+        }
+    }
+
+    /// Metadata describes the module it was written for, so an operation has to drop it rather than
+    /// carry a false claim forward.
+    #[test]
+    fn operations_drop_metadata() {
+        let spec = json!({
+            "p": 2,
+            "type": "finite dimensional module",
+            "gens": { "x0": 0, "x1": 1 },
+            "actions": ["Sq1 x0 = x1"],
+            "cofiber": { "idx": 0, "s": 4, "t": 12 },
+            "self_maps": [
+                { "hom_deg": 4, "int_deg": 12, "map_data": [[1]], "name": "v_1^4" }
+            ],
+        });
+        let mut builder = Builder::from_json(&spec).unwrap();
+        builder.set_name("C2");
+        builder.dual().unwrap();
+
+        let json = builder.to_json();
+        assert!(json["cofiber"].is_null());
+        assert!(json["self_maps"].is_null());
+        assert_eq!(json["name"], json!("C2^*"));
+    }
+
+    /// `C(2) (x) C(eta)` is in the library as `C2_sm_Ceta.json`, so the tensor product can be checked
+    /// against the module the library itself ships. `test_equal` compares dimensions and actions but
+    /// not names, and each degree here is one dimensional, so the basis ordering is forced.
+    #[test]
+    fn tensor_matches_the_library() {
+        let mut builder = Builder::from_json(&c2()).unwrap();
+        builder
+            .tensor(&Builder::from_json(&ceta()).unwrap())
+            .unwrap();
+        assert_valid(&builder);
+
+        let expected = Builder::from_json(&json!({
+            "p": 2,
+            "type": "finite dimensional module",
+            "gens": { "x0*x0": 0, "x1*x0": 1, "x0*x2": 2, "x1*x2": 3 },
+            "actions": [
+                "Sq1 x0*x0 = x1*x0",
+                "Sq2 x0*x0 = x0*x2",
+                "Sq2 x1*x0 = x1*x2",
+                "Sq1 x0*x2 = x1*x2",
+            ],
+        }))
+        .unwrap();
+
+        let (actual, _) = builder.build();
+        let (expected, _) = expected.build();
+        actual.test_equal(&expected).unwrap();
+    }
+
+    #[test]
+    fn tensor_rejects_mismatched_primes() {
+        let mut builder = Builder::from_json(&c2()).unwrap();
+        let odd = Builder::new(ValidPrime::new(3));
+        assert!(builder.tensor(&odd).is_err());
+        assert!(builder.direct_sum(&odd).is_err());
+    }
+
+    #[test]
+    fn direct_sum_renames_collisions() {
+        let mut builder = Builder::from_json(&c2()).unwrap();
+        builder
+            .direct_sum(&Builder::from_json(&c2()).unwrap())
+            .unwrap();
+        assert_valid(&builder);
+
+        let json = builder.to_json();
+        assert_eq!(
+            json["gens"],
+            json!({ "x0": 0, "x1": 1, "x0_1": 0, "x1_1": 1 })
+        );
+        // Both summands keep their own action, and neither picks up the other's.
+        let actions: Vec<&str> = json["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        assert_eq!(actions.len(), 2);
+        assert!(actions.contains(&"Sq1 x0 = x1"));
+        assert!(actions.contains(&"Sq1 x0_1 = x1_1"));
+    }
+
+    #[test]
+    fn truncate_keeps_a_module_on_both_sides() {
+        let mut top = Builder::from_json(&joker()).unwrap();
+        top.truncate(Some(2), None).unwrap();
+        assert_valid(&top);
+        assert_eq!(top.min_degree(), 2);
+        // Degrees 2, 3 and 4 survive, so both actions among them do too.
+        assert_eq!(
+            top.to_json()["actions"],
+            json!(["Sq2 x2 = x4", "Sq1 x3 = x4"])
+        );
+
+        let mut bottom = Builder::from_json(&joker()).unwrap();
+        bottom.truncate(None, Some(2)).unwrap();
+        assert_valid(&bottom);
+        assert_eq!(bottom.top_degree(), 2);
+        assert_eq!(
+            bottom.to_json()["actions"],
+            json!(["Sq1 x0 = x1", "Sq2 x0 = x2"])
+        );
+
+        assert!(
+            Builder::from_json(&joker())
+                .unwrap()
+                .truncate(Some(3), Some(1))
+                .is_err()
+        );
+    }
+
+    /// On the Joker, `x1` generates `x1`, `x3` and `x4`: `Sq2 x1 = x3` and `Sq1 x3 = x4`.
+    #[test]
+    fn submodule_generated_by_a_cell() {
+        let mut builder = Builder::from_json(&joker()).unwrap();
+        let (degree, idx) = builder.lookup("x1").unwrap();
+        builder.submodule(&[(degree, idx)]).unwrap();
+        assert_valid(&builder);
+
+        let json = builder.to_json();
+        assert_eq!(json["gens"], json!({ "x1": 1, "x3": 3, "x4": 4 }));
+        assert_eq!(json["actions"], json!(["Sq2 x1 = x3", "Sq1 x3 = x4"]));
+    }
+
+    /// `x0` generates the whole Joker, so the submodule it spans is the Joker again.
+    #[test]
+    fn submodule_generated_by_the_bottom_cell_is_everything() {
+        let original = Builder::from_json(&joker()).unwrap();
+        let mut builder = Builder::from_json(&joker()).unwrap();
+        let (degree, idx) = builder.lookup("x0").unwrap();
+        builder.submodule(&[(degree, idx)]).unwrap();
+
+        let (actual, failures) = builder.build();
+        assert!(failures.is_empty());
+        let (expected, _) = original.build();
+        actual.test_equal(&expected).unwrap();
+    }
+
+    /// Quotienting the Joker by the submodule generated by `x1` leaves `x0` and `x2` with
+    /// `Sq2 x0 = x2`, which is `C(eta)`.
+    #[test]
+    fn quotient_of_joker_is_ceta() {
+        let mut builder = Builder::from_json(&joker()).unwrap();
+        let (degree, idx) = builder.lookup("x1").unwrap();
+        builder.quotient(&[(degree, idx)]).unwrap();
+        assert_valid(&builder);
+
+        let (actual, _) = builder.build();
+        let (expected, _) = Builder::from_json(&ceta()).unwrap().build();
+        actual.test_equal(&expected).unwrap();
+    }
+
+    #[test]
+    fn submodule_and_quotient_need_a_selection() {
+        let mut builder = Builder::from_json(&joker()).unwrap();
+        assert!(builder.submodule(&[]).is_err());
+        assert!(builder.quotient(&[]).is_err());
+        assert!(builder.submodule(&[(9, 0)]).is_err());
+    }
+
+    /// A module over a sub-Hopf-algebra cannot be operated on, because every operation here works
+    /// over the full Steenrod algebra.
+    #[test]
+    fn operations_refuse_a_profiled_module() {
+        let spec = json!({
+            "p": 2,
+            "algebra": ["milnor"],
+            "profile": { "truncated": true, "p_part": [3, 2, 1] },
+            "type": "finite dimensional module",
+            "gens": { "x0": 0, "x2": 2 },
+            "actions": ["Sq2 x0 = x2"],
+        });
+        let mut builder = Builder::from_json(&spec).unwrap();
+        let other = Builder::from_json(&c2()).unwrap();
+
+        assert!(builder.dual().is_err());
+        assert!(builder.tensor(&other).is_err());
+        assert!(builder.direct_sum(&other).is_err());
+        assert!(builder.submodule(&[(0, 0)]).is_err());
+        assert!(builder.quotient(&[(0, 0)]).is_err());
+        // Shifting and truncating are safe: they do not consult the algebra at all.
+        builder.shift(1);
+        assert_eq!(builder.min_degree(), 1);
+        assert!(builder.truncate(None, Some(3)).is_ok());
+    }
+
+    /// Operations at an odd prime, where the antipode's signs and the Bockstein both come into play.
+    #[test]
+    fn operations_at_an_odd_prime() {
+        let spec = json!({
+            "p": 5,
+            "type": "finite dimensional module",
+            "gens": { "x0": 0, "x1": 1, "x9": 9, "x10": 10 },
+            "actions": ["b x0 = x1", "P1 x1 = x9", "b x9 = x10"],
+        });
+
+        let mut dual = Builder::from_json(&spec).unwrap();
+        dual.dual().unwrap();
+        assert_valid(&dual);
+        assert_eq!(dual.min_degree(), -10);
+        assert_eq!(dual.top_degree(), 0);
+
+        let mut twice = Builder::from_json(&spec).unwrap();
+        twice.dual().unwrap();
+        twice.dual().unwrap();
+        let (actual, _) = twice.build();
+        let (expected, _) = Builder::from_json(&spec).unwrap().build();
+        actual.test_equal(&expected).unwrap();
+
+        let mut sum = Builder::from_json(&spec).unwrap();
+        sum.direct_sum(&Builder::from_json(&spec).unwrap()).unwrap();
+        assert_valid(&sum);
+        assert_eq!(sum.dimension(1), 2);
+
+        let mut squared = Builder::from_json(&spec).unwrap();
+        squared.tensor(&Builder::from_json(&spec).unwrap()).unwrap();
+        assert_valid(&squared);
+        assert_eq!(squared.top_degree(), 20);
     }
 
     #[test]

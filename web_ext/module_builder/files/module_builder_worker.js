@@ -72,6 +72,20 @@ const commands = {
     setActionsText: ({ text }) => ({
         state: requireBuilder().set_actions_text(text),
     }),
+    shift: ({ by }) => ({ state: requireBuilder().shift(by) }),
+    dual: () => ({ state: requireBuilder().dual() }),
+    truncate: ({ min, max }) => ({
+        // `undefined` rather than `null` is what wasm-bindgen maps to `Option::None`.
+        state: requireBuilder().truncate(min ?? undefined, max ?? undefined),
+    }),
+    tensor: ({ other }) => ({ state: requireBuilder().tensor(other) }),
+    directSum: ({ other }) => ({ state: requireBuilder().direct_sum(other) }),
+    submodule: ({ cells }) => ({
+        state: requireBuilder().submodule(new Int32Array(cells)),
+    }),
+    quotient: ({ cells }) => ({
+        state: requireBuilder().quotient(new Int32Array(cells)),
+    }),
     evaluate: ({ expr }) => ({ value: requireBuilder().evaluate(expr) }),
     toJson: () => ({ value: requireBuilder().to_json() }),
     toJsonCompact: () => ({ value: requireBuilder().to_json_compact() }),

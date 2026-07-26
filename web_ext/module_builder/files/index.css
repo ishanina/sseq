@@ -152,6 +152,34 @@ button.ghost {
     line-height: 1.4;
 }
 
+.op-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+}
+
+.op-grid button {
+    margin-bottom: 0;
+}
+
+.op-grid .row button {
+    white-space: nowrap;
+}
+
+.op-grid label {
+    margin: 0.3rem 0 0;
+}
+
+button:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+button:disabled:hover {
+    border-color: var(--line);
+    color: var(--fg);
+}
+
 .status {
     padding: 0.15rem 0.5rem;
     border-radius: 999px;

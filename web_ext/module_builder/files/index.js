@@ -38,14 +38,36 @@ function call(cmd, args) {
 ///
 /// Errors are shown to the user rather than thrown: every one of them is a mistake in what was
 /// asked for (a bad name, an action in a degree that carries no generator), not a bug.
+///
+/// The previous module is pushed onto the undo stack first, and only if the command succeeds, so a
+/// rejected operation does not leave a useless entry behind.
 async function run(cmd, args) {
+    const previous = state === null ? null : JSON.stringify(state.json);
     try {
-        const state = await call(cmd, args);
-        setState(state);
+        const next = await call(cmd, args);
+        if (previous !== null) {
+            undoStack.push(previous);
+            if (undoStack.length > UNDO_LIMIT) {
+                undoStack.shift();
+            }
+        }
+        setState(next);
         return true;
     } catch (e) {
         showToast(e.message, 'error');
         return false;
+    }
+}
+
+async function undo() {
+    const previous = undoStack.pop();
+    if (previous === undefined) {
+        return;
+    }
+    try {
+        setState(await call('load', { json: previous }));
+    } catch (e) {
+        showToast(`Could not undo: ${e.message}`, 'error');
     }
 }
 
@@ -59,8 +81,27 @@ let state = null;
 /// in order to add cells outside the current range.
 let view = { min: 0, max: 4 };
 
-/// The selected cell, as `{ degree, idx }`, or null.
-let selected = null;
+/// The selected cells, as a set of `"degree,idx"` keys. Several may be selected at once, since the
+/// submodule and quotient operations act on a set of cells.
+let selected = new Set();
+
+/// Previous module states, most recent last, so that a destructive operation can be undone.
+const undoStack = [];
+const UNDO_LIMIT = 64;
+
+function cellKey({ degree, idx }) {
+    return `${degree},${idx}`;
+}
+
+function selectedCells() {
+    return [...selected].map(key => {
+        const [degree, idx] = key.split(',');
+        return {
+            degree: Number.parseInt(degree, 10),
+            idx: Number.parseInt(idx, 10),
+        };
+    });
+}
 
 function setState(next) {
     state = next;
@@ -68,8 +109,12 @@ function setState(next) {
         view.min = Math.min(view.min, state.min_degree);
         view.max = Math.max(view.max, state.top_degree);
     }
-    if (selected !== null && dimension(selected.degree) <= selected.idx) {
-        selected = null;
+    // Drop selections that no longer point at a cell, which happens after any operation that
+    // reshapes the module.
+    for (const cell of selectedCells()) {
+        if (dimension(cell.degree) <= cell.idx) {
+            selected.delete(cellKey(cell));
+        }
     }
     save();
     render();
@@ -231,11 +276,7 @@ function render() {
     for (const { degree, names: row } of state.basis) {
         row.forEach((name, idx) => {
             const classes = ['cell'];
-            if (
-                selected !== null &&
-                selected.degree === degree &&
-                selected.idx === idx
-            ) {
+            if (selected.has(cellKey({ degree, idx }))) {
                 classes.push('selected');
             }
             if (implicated.has(`${degree},${idx}`)) {
@@ -356,6 +397,16 @@ function renderPanel() {
             relations.appendChild(div);
         }
     }
+
+    const count = selected.size;
+    document.getElementById('selection-hint').textContent =
+        count === 0
+            ? 'Nothing selected. Click cells in the diagram to choose the generators of a submodule.'
+            : `${count} cell${count === 1 ? '' : 's'} selected: ` +
+              selectedCells()
+                  .map(({ degree, idx }) => names(degree)[idx])
+                  .join(', ');
+    document.getElementById('undo').disabled = undoStack.length === 0;
 
     document.getElementById('module-name').value = state.name;
     document.getElementById('prime').value = `${state.p}`;
@@ -506,8 +557,15 @@ function setUpDiagram() {
             target === null ||
             (target.degree === from.degree && target.idx === from.idx)
         ) {
-            // A click on a cell, or a drag that ended nowhere in particular: just select it.
-            selected = from;
+            // A click on a cell, or a drag that ended nowhere in particular: toggle its
+            // selection, so a set of cells can be built up for the submodule and quotient
+            // operations.
+            const key = cellKey(from);
+            if (selected.has(key)) {
+                selected.delete(key);
+            } else {
+                selected.add(key);
+            }
             render();
             return;
         }
@@ -572,6 +630,33 @@ async function toggleAction(from, to) {
     });
 }
 
+/// Remove every selected cell.
+///
+/// Removal is by name rather than index: deleting one cell renumbers the ones after it in the same
+/// degree, so a list of indices collected beforehand would go stale mid-loop.
+async function removeSelected() {
+    const doomed = selectedCells().map(({ degree, idx }) => names(degree)[idx]);
+    selected.clear();
+    for (const name of doomed) {
+        const found = findCell(name);
+        if (found !== null) {
+            if (!(await run('removeGenerator', found))) {
+                return;
+            }
+        }
+    }
+}
+
+function findCell(name) {
+    for (const { degree, names: row } of state.basis) {
+        const idx = row.indexOf(name);
+        if (idx !== -1) {
+            return { degree, idx };
+        }
+    }
+    return null;
+}
+
 function renameCell({ degree, idx }) {
     const current = names(degree)[idx];
     const name = window.prompt(`Rename ${current}`, current);
@@ -587,17 +672,27 @@ function setUpKeyboard() {
         if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
             return;
         }
-        if (selected === null) {
+        if (event.key === 'z' && (event.ctrlKey || event.metaKey)) {
+            event.preventDefault();
+            undo();
+            return;
+        }
+        if (selected.size === 0) {
             return;
         }
         if (event.key === 'Delete' || event.key === 'Backspace') {
             event.preventDefault();
-            run('removeGenerator', selected);
+            removeSelected();
         } else if (event.key === 'F2') {
             event.preventDefault();
-            renameCell(selected);
+            const cells = selectedCells();
+            if (cells.length === 1) {
+                renameCell(cells[0]);
+            } else {
+                showToast('Select a single cell to rename it.');
+            }
         } else if (event.key === 'Escape') {
-            selected = null;
+            selected.clear();
             render();
         }
     });
@@ -652,7 +747,7 @@ function setUpControls() {
         if (!state.is_zero && !window.confirm('Discard the current module?')) {
             return;
         }
-        selected = null;
+        selected.clear();
         view = { min: 0, max: 4 };
         run('create', { p: state.p });
     });
@@ -666,6 +761,8 @@ function setUpControls() {
         view.min -= 1;
         render();
     });
+
+    setUpOperations();
 
     document.getElementById('evaluate').addEventListener('click', evaluate);
     document
@@ -776,6 +873,97 @@ async function evaluate() {
     }
 }
 
+// -------------------------------------------------------------- operations
+
+function setUpOperations() {
+    document.getElementById('undo').addEventListener('click', undo);
+
+    document.getElementById('op-dual').addEventListener('click', () => {
+        run('dual');
+    });
+
+    document.getElementById('op-shift').addEventListener('click', () => {
+        const by = Number.parseInt(
+            document.getElementById('shift-by').value,
+            10,
+        );
+        if (Number.isNaN(by)) {
+            showToast('Enter how far to shift.', 'error');
+            return;
+        }
+        run('shift', { by });
+    });
+
+    document.getElementById('op-truncate').addEventListener('click', () => {
+        // A blank bound means "no bound", which is why these are nullable rather than defaulted.
+        const bound = id => {
+            const raw = document.getElementById(id).value.trim();
+            return raw === '' ? null : Number.parseInt(raw, 10);
+        };
+        const [min, max] = [bound('truncate-min'), bound('truncate-max')];
+        if (Number.isNaN(min) || Number.isNaN(max)) {
+            showToast('The bounds must be whole numbers, or blank.', 'error');
+            return;
+        }
+        if (min === null && max === null) {
+            showToast('Give at least one bound.', 'error');
+            return;
+        }
+        run('truncate', { min, max });
+    });
+
+    document.getElementById('op-submodule').addEventListener('click', () => {
+        withSelection(cells => run('submodule', { cells }));
+    });
+
+    document.getElementById('op-quotient').addEventListener('click', () => {
+        withSelection(cells => run('quotient', { cells }));
+    });
+
+    document.getElementById('op-tensor').addEventListener('click', () => {
+        withOperand(json => run('tensor', { other: json }));
+    });
+
+    document.getElementById('op-sum').addEventListener('click', () => {
+        withOperand(json => run('directSum', { other: json }));
+    });
+}
+
+/// Call `f` with the selection as the flat `[degree, idx, ...]` list the worker expects.
+function withSelection(f) {
+    if (selected.size === 0) {
+        showToast(
+            'Select the cells to generate the submodule first, by clicking them in the diagram.',
+            'error',
+        );
+        return;
+    }
+    f(selectedCells().flatMap(({ degree, idx }) => [degree, idx]));
+}
+
+async function withOperand(f) {
+    const name = document.getElementById('operand').value;
+    if (name === '') {
+        showToast('Pick a module to operate with.', 'error');
+        return;
+    }
+    try {
+        const response = await fetch(`./steenrod_modules/${name}.json`);
+        if (!response.ok) {
+            throw new Error(`${response.status}`);
+        }
+        const spec = JSON.parse(await response.text());
+        // Most library files carry no `name`, and the result is named after its factors, so fall back
+        // to the file name the way opening a module does.
+        if (spec.name === undefined) {
+            spec.name = name;
+        }
+        await f(JSON.stringify(spec));
+    } catch (e) {
+        showToast(`Could not load ${name}: ${e.message}`, 'error');
+    }
+}
+
 // ------------------------------------------------------------- library & files
 
 async function setUpLibrary() {
@@ -796,10 +984,13 @@ async function setUpLibrary() {
     const loadable = modules.filter(
         m => m.type === 'finite dimensional module',
     );
+    // The same list serves the library and the operand of a tensor or direct sum.
+    const operand = document.getElementById('operand');
     for (const module of loadable) {
         const option = document.createElement('option');
         option.value = module.name;
         option.textContent = `${module.name}  (p = ${module.p})`;
+        operand.appendChild(option.cloneNode(true));
         select.appendChild(option);
     }
     const skipped = modules.length - loadable.length;
@@ -825,7 +1016,7 @@ async function setUpLibrary() {
 async function load(json, name) {
     try {
         const next = await call('load', { json });
-        selected = null;
+        selected.clear();
         view = {
             min: Math.min(0, next.min_degree),
             max: Math.max(4, next.top_degree),

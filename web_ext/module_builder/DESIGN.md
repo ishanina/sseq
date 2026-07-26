@@ -4,9 +4,9 @@ An interactive web interface for building modules over the Steenrod algebra, and
 more generally bounded chain complexes of such ("derived modules"), producing
 files that are drop-in compatible with `ext/steenrod_modules/`.
 
-This document is the plan. Phase 1 is implemented; phases 2 to 4 are not. See the
-[Phasing](#phasing) section at the end for what that covers, and `README.md` for
-how to build and run what exists.
+This document is the plan. Phases 1 and 2 are implemented; phases 3 and 4 are
+not. See the [Phasing](#phasing) section at the end for what that covers, and
+`README.md` for how to build and run what exists.
 
 ## Goals
 
@@ -324,8 +324,30 @@ It is cheap to compute:
 Tests: the defining identity $\sum \chi(x')x'' = \varepsilon$ and $\chi^2 =
 \mathrm{id}$, checked exhaustively in low degrees at $p = 2, 3, 5$ (the full
 coproduct of a basis element being assembled from `decompose` + `coproduct` the
-same way `TensorModule::act_helper` does it); then $M^{\vee\vee} \cong M$, and
-the Joker being self-dual up to shift.
+same way `TensorModule::act_helper` does it); the classical values
+$\chi(Sq^3) = Sq^2 Sq^1$ and $\chi(Sq^4) = Sq^4 + Sq^3 Sq^1$; and
+$M^{\vee\vee} = M$.
+
+Two corrections to what this section originally said, both found while
+implementing it:
+
+- **The Joker is not self-dual here.** It is self-dual as an $A(1)$-module, which
+  is the familiar statement, but this is the full Steenrod algebra. Over $A$ the
+  library's Joker has $Sq^4 x_0 = 0$, while its dual has $Sq^4 x_4^* = x_0^*$,
+  precisely because $\chi(Sq^4) = Sq^4 + Sq^3 Sq^1$ and $Sq^3 Sq^1 x_0 = x_4$.
+  Both degrees are one dimensional, so this is basis independent: the dual really
+  is not isomorphic to the Joker shifted. It makes a sharper test than
+  self-duality would have — a naive transpose gives $Sq^4 = 0$ and fails it.
+- **The Koszul signs are not only in the antipode.** The coproduct of a product
+  needs them too, since multiplication in $A \otimes A$ satisfies
+  $(a \otimes b)(c \otimes d) = (-1)^{|b||c|} ac \otimes bd$. The test that checks
+  the defining identity has to carry that sign, and `b P1 b` at $p = 3$ and
+  $p = 5$ is where it shows.
+
+One limitation, which is the algebra's rather than the antipode's:
+`MilnorAlgebra`'s `Bialgebra::coproduct` asserts $p = 2$, so $\chi$ is
+unavailable in the Milnor basis at odd primes. This does not affect the builder,
+which edits in the Adem basis.
 
 Once the dual's action table is filled in for *all* basis elements, rather than
 just generators, `check_validity` should pass automatically — a useful
@@ -501,8 +523,9 @@ section of `sseq_gui`'s `index.html`.
 1. **Core — done.** Crate, wasm API, `check_validity_all`, cell-diagram editor,
    text mode, live Adem checking, save/load, module library, `sseq_gui` hand-off,
    CI job and deployment.
-2. **Module operations.** Shift, direct sum, tensor, truncate, submodule,
-   quotient; antipode and dual.
+2. **Module operations — done.** Shift, dual, truncate, direct sum, tensor,
+   submodule, quotient, plus the antipode they rest on. Multi-cell selection and
+   an undo stack came with them, since the operations are destructive.
 3. **Derived modules.** Complexes as the native object, cone and fibre,
    cohomology, the new file format; $\Ext^1$ enumeration by linear algebra;
    then resolution-backed $\Ext^i(X, Y)$ charts and cofibre/fibre of a chosen
@@ -536,3 +559,28 @@ Two things came out of building it that the plan above did not anticipate:
 One incidental fix outside the crate: `sseq_gui`'s home page rewrote the `href`
 of every anchor in a module section into a `?module=` link, so it could not
 contain an ordinary link. It now skips anchors with no `data` attribute.
+
+### What phase 2 changed
+
+The antipode corrections are recorded under [Dual](#dual) above. Three further
+decisions worth writing down:
+
+- **Operations drop metadata.** `cofiber`, `products` and `self_maps` describe the
+  module they were written for. The cofibre spec of $M$ says nothing about
+  $M^\vee$ or $M \otimes N$, so carrying those fields across an operation would
+  attach a false claim to the result. Every operation clears them. `shift` and
+  `truncate` are the exception in spirit — they too clear, since a `self_maps`
+  entry's internal degree no longer matches after a suspension.
+- **Operations refuse a profiled module.** Everything here works over the full
+  Steenrod algebra, so dualising or tensoring an $A(2)$-module would silently give
+  the wrong answer. Those operations now fail with an explanation instead. `shift`
+  and `truncate` are allowed, since neither consults the algebra.
+- **Suspension needs no rebuild.** Because actions are keyed by generator name
+  rather than by degree and index, shifting is just a re-grading of the basis; the
+  action list is untouched. This fell out of the phase 1 data model rather than
+  being designed for.
+
+The destructive nature of the operations also forced two interface changes that
+were not in the original plan: selection became a *set* of cells, since submodule
+and quotient act on a set, and an undo stack was added, since a mis-clicked
+`dualise` would otherwise lose work.
