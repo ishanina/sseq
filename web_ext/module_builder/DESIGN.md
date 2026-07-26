@@ -9,15 +9,17 @@ This document is the plan; nothing here is implemented yet.
 ## Goals
 
 1. Add and remove cells (basis elements) in arbitrary internal degrees.
-2. Draw the action of the Steenrod algebra generators between cells.
+2. Draw the action of the Steenrod algebra generators between cells — the
+   $Sq^{2^k}$ at $p = 2$, and $\beta$ and $P^{p^k}$ at odd primes.
 3. Continuously check that the Adem relations hold, and say precisely which
    relation fails and where when they do not.
 4. Save and load, in exactly the JSON format the rest of the repo uses.
 5. Operations: shift, dual, tensor, direct sum, submodule, quotient,
    truncation, and extensions.
-6. Handle bounded chain complexes of finite-dimensional modules, so that
-   arbitrary Ext classes can be realised as explicit objects.
-7. Hand a finished module straight to `sseq_gui` to compute its Adams
+6. Handle bounded chain complexes of finite-dimensional modules, and take the
+   cofibre or fibre of a class in $\Ext^i(X, Y)$ between two such.
+7. Work at every prime the library supports, not only at 2.
+8. Hand a finished module straight to `sseq_gui` to compute its Adams
    spectral sequence.
 
 ## What the repository already provides
@@ -200,32 +202,82 @@ The wasm runs in a worker, using the same `no-modules` + `importScripts` pattern
 as `files/steenrod_calculator_worker.js`, so a panic or a long Ext computation
 cannot freeze the page.
 
-## Editing `Sq^i` actions
+## Editing generator actions
 
-The free parameters of a Steenrod module are the actions of the algebra
-*generators*: at $p = 2$ the $Sq^{2^k}$ (`AdemAlgebra::generators` returns empty
-unless `degree.count_ones() == 1`, `adem_algebra.rs:357`), and at odd primes
-$\beta$ and $P^{p^k}$. Everything else is forced by `extend_actions`. This is
-also exactly what the JSON `actions` array stores.
+The editable data is the action of the algebra *generators*: at $p = 2$ the
+$Sq^{2^k}$ (`AdemAlgebra::generators` returns empty unless
+`degree.count_ones() == 1`, `adem_algebra.rs:357`), and at odd primes $\beta$ and
+$P^{p^k}$. Everything else is forced by `extend_actions`. This is also exactly
+what the JSON `actions` array stores, and what
+`ext/examples/define_module.rs` prompts for.
 
-So "let the user draw an arbitrary $Sq^i$ arc" is not well-posed: for $i$ not a
-generator degree there may be no module with the requested $Sq^i$, and there is
-no linear solve to fall back on, because decomposable actions are *products* of
-generator actions and hence non-linear in them.
+So arcs are draggable only across generator degree gaps. Dragging across any
+other gap explains why rather than silently failing: "Sq3 is not a generator; it
+is determined by Sq2 Sq1."
 
-The interface therefore does three things:
+Two read-only conveniences on top:
 
-1. Draggable arcs for the generators only. Attempting to drag across a
-   non-generator degree gap explains why: "Sq3 is not a generator; it is
-   determined by Sq2 Sq1."
-2. A read-only derived view of the action of every $Sq^i$ and every Adem basis
-   element, so the user can see what their generator choices imply.
-3. An assertion box where any operation may be typed — `Sq3 x0 = x3`, or
+1. A derived view of the action of every $Sq^i$ and every Adem basis element, so
+   one can see what a choice of generator actions implies.
+2. An assertion box where any operation may be typed — `Sq3 x0 = x3`, or
    `Sq2*Sq1 x0 = x3` — and is checked against the derived value, reporting
-   agreement or the actual forced value.
+   agreement or the actual forced value. This reuses `SteenrodEvaluator`, the
+   same engine as `steenrod_calculator`.
 
-This is honest about the mathematics while still letting people think in terms
-of arbitrary $Sq^i$.
+## Odd primes
+
+Odd primes are a first-class requirement, not an afterthought, and the library
+supports them throughout. Concretely:
+
+- **Feature flags.** `Cargo.toml` must use `default-features = false, features =
+  ["odd-primes"]` on `fp` and `algebra`, exactly as
+  `web_ext/steenrod_calculator/Cargo.toml` does. The prime selector offers
+  2, 3, 5, 7, as the calculator's does.
+- **Generators and syntax.** At odd primes the generators are $\beta$ in degree 1
+  and $P^{p^k}$ in degree $q p^k$, written `b` and `P{n}` by
+  `AdemAlgebra::generator_to_string`. So the action strings look like
+  `["b x0 = x1", "P1 x1 = x9", "b x9 = x10"]` — that is
+  `ext/steenrod_modules/C5v1.json` verbatim. Coefficients in $\F_p$ appear on
+  both the arcs and the right-hand sides, e.g. `P1 x0 = 2 x4`.
+- **Relations.** `AdemAlgebra::generating_relations` returns $\beta^2 = 0$ as an
+  explicit edge case in degree 2, then $P^i P^j$ for $i < pj$ and $P^i \beta P^j$
+  for $i < pj + 1$ (`adem_algebra.rs:382-410`). `check_validity` therefore checks
+  exactly the right thing at odd primes with no extra work.
+- **Signs.** `TensorModule` already carries the Koszul signs
+  (`fp::prime::minus_one_to_the_n`), and the antipode implementation will carry
+  them too rather than assuming $\beta$ is the only odd-degree factor.
+- **Resolutions.** Nassau's algorithm is $p = 2$ only and `construct_nassau`
+  rejects odd primes outright (`ext/src/utils.rs:182`), so the phase 3 Ext
+  features must go through `construct_standard`, which is the default path.
+- **Coverage.** Odd-prime resolutions are already benchmarked in CI
+  (`resolve-C3`, `resolve-S_3`), and `C9.json` / `C3v1b1.json` use `cofiber` at
+  $p = 3$. But every `yoneda-*` benchmark is at $p = 2$, so the Yoneda path at
+  odd primes is supported in principle and untested in practice. Adding an
+  odd-prime Yoneda test is part of this work, not an optional extra.
+
+### Choice of basis
+
+The generating set, and hence which arcs are editable, depends on which basis the
+algebra is instantiated with. `AdemAlgebra::generators` returns only the
+$Sq^{2^k}$ (resp. $\beta$, $P^{p^k}$), whereas `MilnorAlgebra::generators`
+additionally returns the $Q_k$ and the $P^s_t$, and is profile-aware
+(`milnor_algebra.rs:696`).
+
+The builder therefore instantiates the **Adem** basis for editing: it is the
+minimal generating set, it matches `ext/examples/define_module.rs`, and its
+`generating_relations` are the Adem relations the user wants checked. Crucially,
+the generator names it emits — `Sq{n}`, `P{n}`, `b` — are also accepted by
+`MilnorAlgebra::basis_element_from_string` (`milnor_algebra.rs:569`), which is why
+a file like `Calpha.json` containing `"P1 x0 = x4"` loads correctly even though
+the default basis for resolving is Milnor. Sticking to those forms is a hard
+constraint on what we write.
+
+One consequence: a `profile` field is honoured only by the Milnor branch of
+`SteenrodAlgebra::from_json` and silently ignored by the Adem branch. Modules
+carrying a profile (e.g. `y1_3.json`) will be loaded, displayed, and re-saved
+with the field preserved, but *editing* over a proper sub-Hopf-algebra requires
+the Milnor generating set and is deferred; the UI will say so rather than
+pretending the profile is in effect.
 
 ## Operations
 
@@ -298,31 +350,60 @@ classes, each previewable as a cell diagram. As a fallback it doubles as a manua
 mode, where the user fills in the off-diagonal arcs by hand with live checking —
 the check being precisely the cocycle condition.
 
-**Phase 3b — arbitrary $\Ext^{s,t}$, via resolutions and Yoneda.** Depend on
-`ext`:
+**Phase 3b — arbitrary $\Ext^{i}(X, Y)$ between derived modules, and the
+cofibre/fibre of a class.** This is the general goal: given two bounded complexes
+$X$ and $Y$ of finite-dimensional modules and a class $\alpha \in
+\operatorname{Hom}_{D(A)}(X, Y[i])$, produce the cofibre and the fibre as explicit
+complexes.
 
-- Resolve $Q$ over a user-chosen range and compute $\Ext^{s,t}(Q, N)$ as a
-  `Subquotient`, using the `HomModule` / `HomPullback` cochain complex. That
-  machinery currently lives in a private `mod hom_cochain_complex` inside
-  `ext/examples/ext_m_n.rs`; it should be lifted into `ext` proper so both the
-  example and this crate can use it.
-- Display the result as a clickable chart (the $\Ext(M, \F_p)$ case is the
-  ordinary Adams $E_2$ chart).
-- Realise a chosen class. For classes in $\Ext^{s,t}(M, \F_p)$,
-  `yoneda::try_yoneda_representative_element` already returns the $s$-fold
-  extension as a complex of `FDModule`s. For general $N$, take the cone of the
-  lifted chain map.
-- Offer to save the result either as an explicit complex or, when it is a
-  cofibre, as the existing `cofiber` field.
+The existing API reaches further towards this than it first appears:
 
-Risks here, stated plainly: `ext::yoneda` is one of the heavier parts of the
+- **The source may already be a complex.** `MuResolution::new_with_save` takes a
+  `CCC = FiniteChainComplex<SteenrodModule>`, and `construct_standard` resolves a
+  multi-module complex — the popped Yoneda complex — as a matter of course
+  (`ext/src/utils.rs:281-284`). So resolving $X$ needs nothing new.
+- **The target may already be a complex.** `yoneda_representative` takes
+  `map: ChainMap<FreeModuleHomomorphism<_>>`, and `ChainMap::chain_maps` is a
+  `Vec` indexed by `s - s_shift` (`yoneda.rs:248, 258, 375, 472`). The
+  single-module case that `construct_standard` uses is `chain_maps: vec![map]`;
+  a chain map into a bounded complex $Y$ is the same call with a longer vector.
+- **The construction of the cofibre is already spelled out.**
+  `yoneda_representative` returns a finite quasi-isomorphic quotient of the
+  resolution through which the map factors; `construct_standard` then does
+  `FiniteChainComplex::from(yoneda)` followed by `.pop()`, and that is the
+  cofibre. The same recipe generalises verbatim.
+- The fibre is the cofibre shifted, so one operation plus a homological shift
+  covers both.
+
+What must be written:
+
+- **$\Ext^{i}(X, Y)$ for complexes.** The cochain complex in
+  `ext/examples/ext_m_n.rs` takes a `FreeChainComplex` source and a single
+  *module* target. For a complex target it becomes the Hom double complex,
+  totalised. That machinery should be lifted out of the example's private
+  `mod hom_cochain_complex` into `ext` proper and generalised there, so the
+  example and this crate share it.
+- **Assembling the `ChainMap` from a chosen class.** Given a class in the
+  computed $\Ext^i$, build the corresponding `FreeModuleHomomorphism`s degree by
+  degree — the same `add_generators_from_matrix_rows` / `extend_by_zero` pattern
+  as `ext/src/utils.rs:253-271`, one per homological degree of $Y$.
+- A UI for picking $\alpha$: a clickable $\Ext^{i}(X, Y)$ chart, which in the
+  case $Y = \F_p$ is the ordinary Adams $E_2$ chart.
+- Saving: an explicit complex in the new format, or — when the object is a
+  cofibre of a class in $\Ext^{s,t}(M, M)$ — the existing `cofiber` field, which
+  keeps the file loadable by today's `ext`.
+
+Risks, stated plainly: `ext::yoneda` is one of the heavier parts of the
 codebase, uses `std::any::Any` downcasting for its operation-rating heuristic,
-and can be slow — hence the `try_` variant and the existing `ext/tests/try_yoneda.rs`.
-The UI must run it in the worker behind an explicit "compute" button with a
-bounded range, surface errors rather than panicking, and allow cancellation.
-Depending on `ext` also grows the wasm binary substantially; `sseq_gui` already
-does exactly this and is deployed, so it is proven to work, but the size should
-be tracked in CI the way the other two sites' are.
+and can be slow — hence the `try_` variant and the existing
+`ext/tests/try_yoneda.rs`. Its output is not small either: the $g$-class
+representative at $(20, 4)$ has modules of dimension $7, 15, 12, 4, 1$ in the
+Adem basis (`ext/examples/benchmarks/yoneda-g-S_2-adem`). The UI must run it in
+the worker behind an explicit "compute" button with a bounded range, surface
+errors rather than panicking, and allow cancellation. Depending on `ext` also
+grows the wasm binary substantially; `sseq_gui` already does exactly this and is
+deployed, so it is proven to work, but the size should be tracked in CI the way
+the other two sites' are.
 
 ## Additions to the library crates
 
@@ -333,15 +414,21 @@ All additive; nothing changes an existing signature.
    as the relation and value. The current method returns only the first failure
    and does not say *which* basis element failed, which is what the UI needs in
    order to highlight the offending arcs.
-2. `antipode` for the Steenrod algebra, in `algebra::algebra` (see above).
+2. `antipode` for the Steenrod algebra, in `algebra::algebra`, with Koszul signs
+   (see above). Useful well beyond this tool.
 3. A dual for `FDModule`.
-4. Lift `hom_cochain_complex` out of `ext/examples/ext_m_n.rs` into `ext`.
+4. Lift `hom_cochain_complex` out of `ext/examples/ext_m_n.rs` into `ext`, and
+   generalise it from a single module target to a bounded complex target (the Hom
+   double complex, totalised) so that $\Ext^i(X, Y)$ between derived modules can
+   be computed.
 5. A `"chain complex of finite dimensional modules"` arm in
    `steenrod_module::from_json` and `construct_standard`, so files the builder
    writes are loadable by `resolve`.
 6. Document the `cofiber` field in the module-specification section of
    `ext/src/lib.rs`.
-7. Optionally, fix `FDModule::add_generator` for degrees below `min_degree`.
+7. An odd-prime Yoneda test, since CI currently exercises that path only at
+   $p = 2$.
+8. Optionally, fix `FDModule::add_generator` for degrees below `min_degree`.
 
 ## Frontend
 
@@ -398,6 +485,11 @@ section of `sseq_gui`'s `index.html`.
 - Extensions: the $\Ext^1$ enumeration must reproduce, for instance, $C(4)$ and
   $C(\eta^2)$, which the library also defines via `cofiber` — a genuine
   cross-check of the two routes against each other.
+- Odd primes throughout, not only at $p = 2$: round-trip and relation checks at
+  $p = 3, 5, 7$; $\beta^2 = 0$ as a rejection case; the dual and the antipode at
+  odd primes; and a Yoneda/cofibre test at $p = 3$, which CI does not currently
+  cover at all. `C9.json` and `C3v1b1.json` are the natural fixtures, since both
+  are defined by a `cofiber` at $p = 3$.
 - `node --test` for the pure-JS parts (state reducer, arc geometry), in the style
   of `web_ext/sseq_gui/wasm/worker_panic.test.mjs`.
 - Optionally a selenium test in the style of `web_ext/sseq_gui/tests`.
@@ -410,7 +502,8 @@ section of `sseq_gui`'s `index.html`.
    quotient; antipode and dual.
 3. **Derived modules.** Complexes as the native object, cone and fibre,
    cohomology, the new file format; $\Ext^1$ enumeration by linear algebra;
-   then resolution-backed $\Ext^{s,t}$ charts and Yoneda realisation.
+   then resolution-backed $\Ext^i(X, Y)$ charts and cofibre/fibre of a chosen
+   class via Yoneda.
 4. **Polish.** CI job, deployment, documentation, remaining tests.
 
 Phases 1 and 2 are self-contained and useful on their own, and neither depends
