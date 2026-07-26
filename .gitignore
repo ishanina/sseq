@@ -40,3 +40,8 @@ chart/python/*.egg-info
 # Claude
 .claude
 
+ext/steenrod_modules/.DS_Store
+ext/examples/.DS_Store
+ext/crates/.DS_Store
+ext/.DS_Store
+.DS_Store

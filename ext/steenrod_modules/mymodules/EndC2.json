@@ -1,0 +1,6 @@
+{
+    "p": 2,
+    "type": "finite dimensional module",
+    "gens": { "Dx0x0": 0, "Dx0x1": 1, "Dx1x0": -1, "Dx1x1": 0 },
+    "actions": ["Sq1 Dx1x1 = Dx0x1", "Sq2 Dx1x0 = Dx0x1", "Sq1 Dx0x0 = Dx0x1", "Sq1 Dx1x0 = Dx1x1 + Dx0x0"]
+}
