@@ -7,6 +7,9 @@ pub use adem_algebra::AdemAlgebra;
 mod algebra_trait;
 pub use algebra_trait::{Algebra, GeneratedAlgebra, MuAlgebra, UnstableAlgebra};
 
+mod antipode;
+pub use antipode::Antipode;
+
 mod bialgebra_trait;
 pub use bialgebra_trait::Bialgebra;
 

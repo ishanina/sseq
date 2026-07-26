@@ -107,7 +107,9 @@ if (params.module || params.module_json) {
 
     sections.forEach(n => {
         n.children[1].children.forEach(a => {
-            if (a.tagName == 'A') {
+            // An anchor with no `data` attribute is an ordinary link rather
+            // than a module, so leave its href alone.
+            if (a.tagName == 'A' && a.getAttribute('data') !== null) {
                 a.innerHTML = renderLaTeX(a.innerHTML);
                 a.href = `?module=${a.getAttribute('data')}&degree=40`;
             }

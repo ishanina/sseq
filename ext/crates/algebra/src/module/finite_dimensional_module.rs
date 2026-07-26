@@ -7,8 +7,8 @@ use serde::Deserialize;
 use serde_json::{json, value::Value};
 
 use crate::{
-    algebra::{Algebra, GeneratedAlgebra},
-    module::{Module, ModuleFailedRelationError, ZeroModule},
+    algebra::{Algebra, Bialgebra, GeneratedAlgebra},
+    module::{Module, ModuleFailedRelationError, RelationFailure, ZeroModule},
 };
 
 pub struct FiniteDimensionalModule<A: Algebra> {
@@ -397,6 +397,90 @@ impl<A: Algebra> FiniteDimensionalModule<A> {
     }
 }
 
+impl<A: Algebra + Bialgebra> FiniteDimensionalModule<A> {
+    /// The dual module $M^\vee$, with $(M^\vee)_{-n} = (M_n)^*$ and the dual basis carrying the same
+    /// names.
+    ///
+    /// The action is *not* simply the transpose. Transposing the action of $A$ on $M$ gives a right
+    /// module, equivalently a module over $A^{\mathrm{op}}$, which is not $A$ because $A$ is not
+    /// commutative — the transpose of $Sq^a Sq^b$ is the transpose of $Sq^b$ times the transpose of
+    /// $Sq^a$. The antipode is what identifies $A^{\mathrm{op}}$ with $A$, so the definition is
+    ///
+    /// $$ \langle a f, x\rangle = \langle f, \chi(a) x\rangle, $$
+    ///
+    /// and the matrix of $a$ on $M^\vee$ is the transpose of the matrix of $\chi(a)$ on $M$.
+    ///
+    /// Every basis element of the algebra is filled in, not only the generators, so the result
+    /// satisfies the algebra's relations by construction rather than by luck; the tests check this.
+    /// [`Self::to_json`] still writes out only the generator actions.
+    pub fn dual(&self) -> Self {
+        let algebra = self.algebra();
+        let min_degree = self.min_degree();
+
+        if self.graded_dimension.is_empty() {
+            return Self::new(algebra, self.name.clone(), BiVec::new(-min_degree));
+        }
+        let top_degree = self.graded_dimension.max_degree();
+
+        let mut graded_dimension = BiVec::with_capacity(-top_degree, -min_degree + 1);
+        for degree in -top_degree..=-min_degree {
+            graded_dimension.push(self.dimension(-degree));
+        }
+
+        let mut dual = Self::new(algebra.clone(), self.name.clone(), graded_dimension);
+        for degree in -top_degree..=-min_degree {
+            for idx in 0..dual.dimension(degree) {
+                dual.set_basis_element_name(degree, idx, self.gen_names[-degree][idx].clone());
+            }
+        }
+
+        let p = self.prime();
+        let antipode = crate::algebra::Antipode::new(algebra.clone());
+        antipode.compute_through_degree(top_degree - min_degree);
+
+        // `input_degree` and `output_degree` are degrees in the dual, so `-input_degree` and
+        // `-output_degree` are the degrees in `self` they come from.
+        for input_degree in -top_degree..=-min_degree {
+            if dual.dimension(input_degree) == 0 {
+                continue;
+            }
+            for output_degree in (input_degree + 1)..=-min_degree {
+                let op_degree = output_degree - input_degree;
+                let source_degree = -output_degree;
+                let target_degree = -input_degree;
+                if dual.dimension(output_degree) == 0 {
+                    continue;
+                }
+                let mut image = FpVector::new(p, self.dimension(target_degree));
+                for op_idx in 0..algebra.dimension(op_degree) {
+                    let chi = antipode.on_basis_element(op_degree, op_idx);
+                    for source_idx in 0..self.dimension(source_degree) {
+                        image.set_to_zero();
+                        for (chi_idx, coeff) in chi.iter_nonzero() {
+                            self.act_on_basis(
+                                image.as_slice_mut(),
+                                coeff,
+                                op_degree,
+                                chi_idx,
+                                source_degree,
+                                source_idx,
+                            );
+                        }
+                        // `image` is `chi(a) x_source`, so its coefficient on `x_target` is the value
+                        // of `a` applied to the dual basis element of `x_target`, read off against
+                        // the dual basis element of `x_source`.
+                        for (target_idx, value) in image.iter_nonzero() {
+                            dual.action_mut(op_degree, op_idx, input_degree, target_idx)
+                                .add_basis_element(source_idx, value);
+                        }
+                    }
+                }
+            }
+        }
+        dual
+    }
+}
+
 impl<M: Module> From<&M> for FiniteDimensionalModule<M::Algebra> {
     /// This should really by try_from but orphan rules prohibit this
     fn from(module: &M) -> Self {
@@ -546,8 +630,29 @@ impl<A: GeneratedAlgebra> FiniteDimensionalModule<A> {
         input_deg: i32,
         output_deg: i32,
     ) -> Result<(), ModuleFailedRelationError> {
+        match self
+            .check_validity_all(input_deg, output_deg)
+            .into_iter()
+            .next()
+        {
+            None => Ok(()),
+            Some(failure) => Err(ModuleFailedRelationError {
+                relation: failure.relation,
+                value: failure.value,
+            }),
+        }
+    }
+
+    /// Like [`Self::check_validity`], but reports every relation that fails rather than stopping at
+    /// the first, and records which basis element each failure occurred on.
+    ///
+    /// The failures are returned in the same order [`Self::check_validity`] encounters them, so the
+    /// first entry is exactly the failure that method reports. An empty return value means the
+    /// module satisfies all the algebra's relations from `input_deg` to `output_deg`.
+    pub fn check_validity_all(&self, input_deg: i32, output_deg: i32) -> Vec<RelationFailure> {
+        let mut failures = Vec::new();
         if output_deg <= input_deg {
-            return Ok(());
+            return failures;
         }
         let p = self.prime();
         let algebra = self.algebra();
@@ -586,15 +691,19 @@ impl<A: GeneratedAlgebra> FiniteDimensionalModule<A> {
                         relation_string.pop();
                     }
 
-                    let value_string = self.element_to_string(output_deg, output_vec.as_slice());
-                    return Err(ModuleFailedRelationError {
+                    failures.push(RelationFailure {
+                        input_idx: idx,
                         relation: relation_string,
-                        value: value_string,
+                        value: self.element_to_string(output_deg, output_vec.as_slice()),
                     });
+
+                    // Unlike `check_validity`, we carry on after a failure, so the accumulator has
+                    // to be reset before the next relation is tested.
+                    output_vec.set_to_zero();
                 }
             }
         }
-        Ok(())
+        failures
     }
 
     pub fn extend_actions(&mut self, input_deg: i32, output_deg: i32) {
@@ -825,5 +934,199 @@ mod tests {
         // A non-increasing bidegree is a no-op returning Ok rather than asserting.
         assert!(module.check_validity(1, 1).is_ok());
         assert!(module.check_validity(2, 1).is_ok());
+    }
+
+    /// `Sq1 x0 = x1`, `Sq1 x1 = x2` violates `Sq1 Sq1 = 0`. `check_validity_all` must report the
+    /// failure with the basis element it happened on, and must agree with `check_validity` on the
+    /// first failure.
+    #[test]
+    fn check_validity_all_reports_failures() {
+        let p = fp::prime::ValidPrime::new(2);
+        let algebra = Arc::new(AdemAlgebra::new(p, false));
+        algebra.compute_basis(10);
+        let mut module = FiniteDimensionalModule::new(
+            Arc::clone(&algebra),
+            String::new(),
+            BiVec::from_vec(0, vec![1, 1, 1]),
+        );
+        module.set_action(1, 0, 0, 0, &[1]);
+        module.set_action(1, 0, 1, 0, &[1]);
+        module.extend_actions(0, 2);
+
+        let failures = module.check_validity_all(0, 2);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].input_idx, 0);
+        assert_eq!(failures[0].relation, "1 * Sq1 * Sq1");
+        assert_eq!(failures[0].value, "x2_0");
+
+        // The error `check_validity` reports is the first of these.
+        let err = module.check_validity(0, 2).unwrap_err();
+        assert_eq!(err.relation, failures[0].relation);
+        assert_eq!(err.value, failures[0].value);
+    }
+
+    /// Every relation must hold on the dual. This is the real test of the antipode: with a naive
+    /// transpose instead of `chi`, the Adem relations fail as soon as the module is wide enough for a
+    /// decomposable operation to act.
+    fn assert_relations_hold<A: GeneratedAlgebra>(module: &FiniteDimensionalModule<A>) {
+        let min = module.min_degree();
+        let top = module.max_degree().unwrap();
+        for input_deg in min..=top {
+            for output_deg in (input_deg + 1)..=top {
+                let failures = module.check_validity_all(input_deg, output_deg);
+                assert!(
+                    failures.is_empty(),
+                    "relations fail from {input_deg} to {output_deg}: {failures:?}"
+                );
+            }
+        }
+    }
+
+    fn module_from_json(p: u32, json: &Value) -> FiniteDimensionalModule<AdemAlgebra> {
+        let p = fp::prime::ValidPrime::new(p);
+        let algebra = Arc::new(AdemAlgebra::new(p, false));
+        algebra.compute_basis(30);
+        FiniteDimensionalModule::from_json(algebra, json).unwrap()
+    }
+
+    fn joker() -> FiniteDimensionalModule<AdemAlgebra> {
+        module_from_json(
+            2,
+            &serde_json::json!({
+                "gens": {"x0": 0, "x1": 1, "x2": 2, "x3": 3, "x4": 4},
+                "actions": [
+                    "Sq1 x0 = x1",
+                    "Sq2 x0 = x2",
+                    "Sq2 x1 = x3",
+                    "Sq2 x2 = x4",
+                    "Sq1 x3 = x4",
+                ],
+            }),
+        )
+    }
+
+    /// The dual reverses the grading and the arrows.
+    ///
+    /// The Joker is the standard example of a self-dual module, but that is a statement about
+    /// $A(1) = \langle Sq^1, Sq^2\rangle$, and this is the full Steenrod algebra. Over $A$ the Joker
+    /// has $Sq^4 x_0 = 0$, whereas its dual has $Sq^4 x_4^* = x_0^*$, because
+    /// $\chi(Sq^4) = Sq^4 + Sq^3 Sq^1$ and $Sq^3 Sq^1 x_0 = x_4$. Since both degrees are
+    /// one dimensional, "$Sq^4$ from the bottom cell to the top cell" is basis independent, so the
+    /// dual really is not isomorphic to the Joker shifted.
+    #[test]
+    fn dual_of_joker() {
+        let dual = joker().dual();
+        assert_eq!(dual.min_degree(), -4);
+        assert_eq!(dual.max_degree().unwrap(), 0);
+        for degree in -4..=0 {
+            assert_eq!(dual.dimension(degree), 1);
+        }
+        assert_relations_hold(&dual);
+
+        let mut json = serde_json::json!({});
+        dual.to_json(&mut json);
+        assert_eq!(
+            json["actions"],
+            serde_json::json!([
+                "Sq1 x4 = x3",
+                "Sq2 x4 = x2",
+                "Sq4 x4 = x0",
+                "Sq2 x3 = x1",
+                "Sq2 x2 = x0",
+                "Sq1 x1 = x0",
+            ])
+        );
+    }
+
+    /// Dualising twice is the identity, on the nose: the grading comes back and so do the names.
+    #[test]
+    fn double_dual_is_the_identity() {
+        for module in [
+            joker(),
+            module_from_json(
+                2,
+                &serde_json::json!({
+                    "gens": {"x0": 0, "y0": 0, "x1": 1, "x2": 2},
+                    "actions": ["Sq1 x0 = x1", "Sq1 y0 = x1", "Sq1 x1 = 0", "Sq2 x0 = x2"],
+                }),
+            ),
+            // An odd prime, where the antipode's signs matter.
+            module_from_json(
+                5,
+                &serde_json::json!({
+                    "gens": {"x0": 0, "x1": 1, "x9": 9, "x10": 10},
+                    "actions": ["b x0 = x1", "P1 x1 = x9", "b x9 = x10"],
+                }),
+            ),
+            module_from_json(
+                3,
+                &serde_json::json!({
+                    "gens": {"x0": 0, "x1": 1},
+                    "actions": ["b x0 = 2 x1"],
+                }),
+            ),
+        ] {
+            assert_relations_hold(&module);
+            let dual = module.dual();
+            assert_relations_hold(&dual);
+            dual.dual().test_equal(&module).unwrap();
+        }
+    }
+
+    /// A naive transpose would get the dual wrong, and `Sq4` on the Joker is where it shows.
+    ///
+    /// `Sq4 x0 = 0` on the Joker, so the transpose of `Sq4` is zero. But `chi(Sq4) = Sq4 + Sq3 Sq1`
+    /// and `Sq3 Sq1 x0 = x4`, so the antipode makes `Sq4` act non-trivially on the dual. Any
+    /// implementation that transposes without `chi` fails this.
+    #[test]
+    fn dual_uses_the_antipode() {
+        let joker = joker();
+        let dual = joker.dual();
+        let p = joker.prime();
+        let algebra = joker.algebra();
+        let (sq4_degree, sq4) = algebra.basis_element_from_string("Sq4").unwrap();
+
+        // `Sq4` is zero on the Joker.
+        let mut image = FpVector::new(p, joker.dimension(4));
+        joker.act_on_basis(image.as_slice_mut(), 1, sq4_degree, sq4, 0, 0);
+        assert!(image.is_zero());
+
+        // But not on the dual, where it takes the bottom cell to the top one.
+        let mut dual_image = FpVector::new(p, dual.dimension(0));
+        dual.act_on_basis(dual_image.as_slice_mut(), 1, sq4_degree, sq4, -4, 0);
+        assert_eq!(dual.element_to_string(0, dual_image.as_slice()), "x0");
+
+        // `Sq3` is the other half of the check: `chi(Sq3) = Sq2 Sq1`, which sends `x0` to `x3`, so on
+        // the dual `Sq3` takes the dual of `x3` to the dual of `x0` and kills the dual of `x4`.
+        let (sq3_degree, sq3) = algebra.basis_element_from_string("Sq3").unwrap();
+        let mut dual_image = FpVector::new(p, dual.dimension(0));
+        dual.act_on_basis(dual_image.as_slice_mut(), 1, sq3_degree, sq3, -3, 0);
+        assert_eq!(dual.element_to_string(0, dual_image.as_slice()), "x0");
+
+        let mut dual_image = FpVector::new(p, dual.dimension(-1));
+        dual.act_on_basis(dual_image.as_slice_mut(), 1, sq3_degree, sq3, -4, 0);
+        assert!(dual_image.is_zero());
+    }
+
+    #[test]
+    fn dual_of_zero_module() {
+        let p = fp::prime::ValidPrime::new(2);
+        let algebra = Arc::new(AdemAlgebra::new(p, false));
+        algebra.compute_basis(10);
+        let zero = FiniteDimensionalModule::new(algebra, String::new(), BiVec::new(3));
+        let dual = zero.dual();
+        assert_eq!(dual.min_degree(), -3);
+        assert_eq!(dual.total_dimension(), 0);
+    }
+
+    /// A valid module reports no failures, and a non-increasing bidegree is a no-op.
+    #[test]
+    fn check_validity_all_on_valid_module() {
+        let module = make_test_module();
+        for input_deg in 0..=2 {
+            for output_deg in 0..=2 {
+                assert!(module.check_validity_all(input_deg, output_deg).is_empty());
+            }
+        }
     }
 }

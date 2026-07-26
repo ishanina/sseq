@@ -29,6 +29,15 @@ Web interfaces to `ext`. There are two subprojects at the moment:
    This is available at
    https://spectralsequences.github.io/sseq/calculator/ .
 
+ - `module_builder`: An interactive editor for finite dimensional modules over
+   the Steenrod algebra. Add cells, draw the action of the algebra generators
+   between them, and have the Adem relations checked as you edit. Modules save
+   in the same format as `ext/steenrod_modules`, and can be handed straight to
+   `sseq_gui`.
+
+   This is available at
+   https://spectralsequences.github.io/sseq/module_builder/ .
+
 3. `python_ext`
 WIP python bindings for the `ext` library.
 
