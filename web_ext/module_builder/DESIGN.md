@@ -4,7 +4,9 @@ An interactive web interface for building modules over the Steenrod algebra, and
 more generally bounded chain complexes of such ("derived modules"), producing
 files that are drop-in compatible with `ext/steenrod_modules/`.
 
-This document is the plan; nothing here is implemented yet.
+This document is the plan. Phase 1 is implemented; phases 2 to 4 are not. See the
+[Phasing](#phasing) section at the end for what that covers, and `README.md` for
+how to build and run what exists.
 
 ## Goals
 
@@ -496,16 +498,41 @@ section of `sseq_gui`'s `index.html`.
 
 ## Phasing
 
-1. **Core.** Crate, wasm API, `check_validity_all`, cell-diagram editor, text
-   mode, live Adem checking, save/load, module library, `sseq_gui` hand-off.
+1. **Core — done.** Crate, wasm API, `check_validity_all`, cell-diagram editor,
+   text mode, live Adem checking, save/load, module library, `sseq_gui` hand-off,
+   CI job and deployment.
 2. **Module operations.** Shift, direct sum, tensor, truncate, submodule,
    quotient; antipode and dual.
 3. **Derived modules.** Complexes as the native object, cone and fibre,
    cohomology, the new file format; $\Ext^1$ enumeration by linear algebra;
    then resolution-backed $\Ext^i(X, Y)$ charts and cofibre/fibre of a chosen
    class via Yoneda.
-4. **Polish.** CI job, deployment, documentation, remaining tests.
+4. **Polish.** Remaining tests, further documentation.
 
 Phases 1 and 2 are self-contained and useful on their own, and neither depends
 on `ext`. Phase 3 is where the wasm binary grows and where the schedule risk
 lives.
+
+### What phase 1 changed, and what it taught us
+
+The CI job and deployment were pulled forward out of phase 4, since a site that
+is not deployed is not testable by anyone else.
+
+Two things came out of building it that the plan above did not anticipate:
+
+- **Sub-Hopf-algebra modules are not modules over the Steenrod algebra.** Thirteen
+  of the thirty-six finite dimensional modules in `ext/steenrod_modules` carry a
+  `profile`; `tmf2_sm_DA1.json` is an $A(2)$-module on which $Sq^8$ does not act,
+  so checking it against the full Adem relations reports three failures that are
+  not mistakes. The builder now detects a `profile`, declines to check the module,
+  and says why. The plan had already deferred *editing* over a subalgebra, but not
+  noticed that *checking* had to be handled too.
+- **Generator names may contain more than `[A-Za-z0-9_]`.** The library uses
+  tensor-product names such as `x0*x0` in `C2_sm_Ceta.json`. Validation now
+  rejects only what the `actions` grammar genuinely cannot represent — whitespace,
+  `+`, `=`, and a leading digit — because a name we reject is a file we cannot
+  load.
+
+One incidental fix outside the crate: `sseq_gui`'s home page rewrote the `href`
+of every anchor in a module section into a `?module=` link, so it could not
+contain an ordinary link. It now skips anchors with no `data` attribute.

@@ -1,0 +1,24 @@
+[package]
+name = "module_builder"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# `odd-primes` is explicit rather than inherited: the builder must work at every
+# prime the library supports, not only at 2.
+algebra = { path = "../../ext/crates/algebra", default-features = false, features = [
+    "odd-primes",
+] }
+bivec = { path = "../../ext/crates/bivec" }
+fp = { path = "../../ext/crates/fp", default-features = false, features = [
+    "odd-primes",
+] }
+
+anyhow = "1"
+# `preserve_order` so the `gens` object keeps the order generators were added in,
+# matching how `ext` writes the files in `ext/steenrod_modules`.
+serde_json = { version = "1", features = ["preserve_order"] }
+wasm-bindgen = "0.2"
+
+[lib]
+crate-type = ["cdylib", "rlib"]

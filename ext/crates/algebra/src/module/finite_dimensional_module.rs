@@ -8,7 +8,7 @@ use serde_json::{json, value::Value};
 
 use crate::{
     algebra::{Algebra, GeneratedAlgebra},
-    module::{Module, ModuleFailedRelationError, ZeroModule},
+    module::{Module, ModuleFailedRelationError, RelationFailure, ZeroModule},
 };
 
 pub struct FiniteDimensionalModule<A: Algebra> {
@@ -546,8 +546,29 @@ impl<A: GeneratedAlgebra> FiniteDimensionalModule<A> {
         input_deg: i32,
         output_deg: i32,
     ) -> Result<(), ModuleFailedRelationError> {
+        match self
+            .check_validity_all(input_deg, output_deg)
+            .into_iter()
+            .next()
+        {
+            None => Ok(()),
+            Some(failure) => Err(ModuleFailedRelationError {
+                relation: failure.relation,
+                value: failure.value,
+            }),
+        }
+    }
+
+    /// Like [`Self::check_validity`], but reports every relation that fails rather than stopping at
+    /// the first, and records which basis element each failure occurred on.
+    ///
+    /// The failures are returned in the same order [`Self::check_validity`] encounters them, so the
+    /// first entry is exactly the failure that method reports. An empty return value means the
+    /// module satisfies all the algebra's relations from `input_deg` to `output_deg`.
+    pub fn check_validity_all(&self, input_deg: i32, output_deg: i32) -> Vec<RelationFailure> {
+        let mut failures = Vec::new();
         if output_deg <= input_deg {
-            return Ok(());
+            return failures;
         }
         let p = self.prime();
         let algebra = self.algebra();
@@ -586,15 +607,19 @@ impl<A: GeneratedAlgebra> FiniteDimensionalModule<A> {
                         relation_string.pop();
                     }
 
-                    let value_string = self.element_to_string(output_deg, output_vec.as_slice());
-                    return Err(ModuleFailedRelationError {
+                    failures.push(RelationFailure {
+                        input_idx: idx,
                         relation: relation_string,
-                        value: value_string,
+                        value: self.element_to_string(output_deg, output_vec.as_slice()),
                     });
+
+                    // Unlike `check_validity`, we carry on after a failure, so the accumulator has
+                    // to be reset before the next relation is tested.
+                    output_vec.set_to_zero();
                 }
             }
         }
-        Ok(())
+        failures
     }
 
     pub fn extend_actions(&mut self, input_deg: i32, output_deg: i32) {
@@ -825,5 +850,45 @@ mod tests {
         // A non-increasing bidegree is a no-op returning Ok rather than asserting.
         assert!(module.check_validity(1, 1).is_ok());
         assert!(module.check_validity(2, 1).is_ok());
+    }
+
+    /// `Sq1 x0 = x1`, `Sq1 x1 = x2` violates `Sq1 Sq1 = 0`. `check_validity_all` must report the
+    /// failure with the basis element it happened on, and must agree with `check_validity` on the
+    /// first failure.
+    #[test]
+    fn check_validity_all_reports_failures() {
+        let p = fp::prime::ValidPrime::new(2);
+        let algebra = Arc::new(AdemAlgebra::new(p, false));
+        algebra.compute_basis(10);
+        let mut module = FiniteDimensionalModule::new(
+            Arc::clone(&algebra),
+            String::new(),
+            BiVec::from_vec(0, vec![1, 1, 1]),
+        );
+        module.set_action(1, 0, 0, 0, &[1]);
+        module.set_action(1, 0, 1, 0, &[1]);
+        module.extend_actions(0, 2);
+
+        let failures = module.check_validity_all(0, 2);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].input_idx, 0);
+        assert_eq!(failures[0].relation, "1 * Sq1 * Sq1");
+        assert_eq!(failures[0].value, "x2_0");
+
+        // The error `check_validity` reports is the first of these.
+        let err = module.check_validity(0, 2).unwrap_err();
+        assert_eq!(err.relation, failures[0].relation);
+        assert_eq!(err.value, failures[0].value);
+    }
+
+    /// A valid module reports no failures, and a non-increasing bidegree is a no-op.
+    #[test]
+    fn check_validity_all_on_valid_module() {
+        let module = make_test_module();
+        for input_deg in 0..=2 {
+            for output_deg in 0..=2 {
+                assert!(module.check_validity_all(input_deg, output_deg).is_empty());
+            }
+        }
     }
 }

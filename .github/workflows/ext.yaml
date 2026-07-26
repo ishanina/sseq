@@ -133,6 +133,11 @@ jobs:
       - name: Lint sseq_gui tests
         run: cd web_ext/sseq_gui && just lint-selenium
 
+      # Only the formatting check: the module builder's clippy runs in its own job, which has the
+      # wasm32 target installed.
+      - name: Check module builder formatting
+        run: cd web_ext/module_builder && just lint-fmt
+
   # Build the wasm webserver with the default `panic=abort` configuration on
   # stable/beta. This is the compatibility build; the deployed artifact is
   # produced by the `webserver-deploy` job below with `panic=unwind`.
@@ -400,6 +405,66 @@ jobs:
           name: calculator-${{ matrix.toolchain }}
           path: web_ext/steenrod_calculator/dist/
 
+  module-builder:
+    if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository }}
+    runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: 1
+      RUSTFLAGS: "-D warnings"
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+
+    strategy:
+      matrix:
+        toolchain: ["stable", "beta", "nightly"]
+
+    continue-on-error: ${{ matrix.toolchain != 'stable' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: extractions/setup-just@v4
+        with:
+          just-version: "1.54.0"
+
+      - name: Install rustup
+        id: rustup
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+
+      - name: Cache files
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo
+            /usr/share/rust/.cargo
+            **/target
+          key: module-builder-${{ steps.rustup.outputs.rustc_hash }}-${{ hashFiles('**/Cargo.*') }}
+
+      - name: Install wasm-opt
+        run: sudo apt-get install binaryen
+
+      - name: Setup build environment
+        run: cd web_ext/module_builder && just setup-wasm
+
+      - name: Lint module builder
+        run: cd web_ext/module_builder && just lint-clippy
+
+      - name: Test module builder
+        run: cd web_ext/module_builder && just test
+
+      - name: Build wasm
+        run: cd web_ext/module_builder && just all
+
+      - name: Benchmark wasm size
+        run: ls -l web_ext/module_builder/dist/module_builder_wasm_bg.wasm
+
+      - name: Upload module builder
+        uses: actions/upload-artifact@v6
+        with:
+          name: module-builder-${{ matrix.toolchain }}
+          path: web_ext/module_builder/dist/
+
   docs:
     if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository }}
     runs-on: ubuntu-latest
@@ -446,7 +511,17 @@ jobs:
           path: ext/target/doc/
 
   deploy:
-    needs: [test, lint, webserver, webserver-deploy, calculator, docs, selenium]
+    needs:
+      [
+        test,
+        lint,
+        webserver,
+        webserver-deploy,
+        calculator,
+        module-builder,
+        docs,
+        selenium,
+      ]
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
@@ -462,6 +537,12 @@ jobs:
         with:
           name: calculator-stable
           path: calculator
+
+      - name: Download module builder
+        uses: actions/download-artifact@v7
+        with:
+          name: module-builder-stable
+          path: module_builder
 
       - name: Download docs
         uses: actions/download-artifact@v7

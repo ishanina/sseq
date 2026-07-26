@@ -297,6 +297,32 @@ impl std::fmt::Display for ModuleFailedRelationError {
 
 impl std::error::Error for ModuleFailedRelationError {}
 
+/// A single algebra relation that a module fails to satisfy, together with the basis element it
+/// fails on.
+///
+/// [`ModuleFailedRelationError`] reports only the relation and the value it takes. This additionally
+/// records *which* basis element of the input degree was acted on, which lets a caller point at the
+/// offending part of the module rather than just reporting that something is wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationFailure {
+    /// The index of the input basis element within its degree.
+    pub input_idx: usize,
+    /// The relation that is supposed to act as zero, as a string.
+    pub relation: String,
+    /// The value the relation takes on the input basis element instead of zero.
+    pub value: String,
+}
+
+impl std::fmt::Display for RelationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Relation failed on basis element {}:\n    {}  !=  0\nInstead it is equal to {}\n",
+            self.input_idx, self.relation, self.value
+        )
+    }
+}
+
 /// Error returned by [`Module::try_act`] and [`Module::try_act_on_basis`].
 ///
 /// The variants separate the distinct failure categories so callers (e.g. the

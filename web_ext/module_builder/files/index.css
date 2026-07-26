@@ -1,0 +1,365 @@
+:root {
+    --bg: #ffffff;
+    --fg: #1b1b1b;
+    --muted: #6a6a6a;
+    --line: #d4d4d4;
+    --panel: #f7f7f7;
+    --accent: #1f6feb;
+    --good: #1a7f37;
+    --bad: #b42318;
+    --warn: #9a6700;
+    --cell: #1b1b1b;
+    --cell-selected: #1f6feb;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+    font-size: 14px;
+}
+
+header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.6rem 1rem;
+    border-bottom: 1px solid var(--line);
+}
+
+header h1 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin: 0;
+    flex-grow: 1;
+}
+
+h2 {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    margin: 0 0 0.5rem;
+}
+
+#help {
+    padding: 0.5rem 1rem 1rem;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+    max-width: 70rem;
+}
+
+#help p {
+    margin: 0.5rem 0;
+    line-height: 1.5;
+}
+
+main {
+    display: grid;
+    grid-template-columns: 15rem minmax(0, 1fr) 21rem;
+    align-items: start;
+    height: calc(100vh - 3rem);
+}
+
+#sidebar,
+#panel {
+    padding: 0.8rem;
+    overflow-y: auto;
+    max-height: 100%;
+}
+
+#sidebar {
+    border-right: 1px solid var(--line);
+}
+
+#panel {
+    border-left: 1px solid var(--line);
+}
+
+section {
+    margin-bottom: 1.4rem;
+}
+
+label {
+    display: block;
+    margin-bottom: 0.5rem;
+    color: var(--muted);
+}
+
+.row {
+    display: flex;
+    gap: 0.3rem;
+}
+
+input[type='text'],
+input[type='number'],
+select,
+textarea {
+    width: 100%;
+    padding: 0.3rem 0.4rem;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    font: inherit;
+    color: var(--fg);
+    background: var(--bg);
+}
+
+textarea {
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+    resize: vertical;
+}
+
+button,
+.button-like {
+    display: inline-block;
+    padding: 0.3rem 0.6rem;
+    margin-bottom: 0.3rem;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    background: var(--bg);
+    font: inherit;
+    color: var(--fg);
+    cursor: pointer;
+    text-align: center;
+}
+
+button:hover,
+.button-like:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+button.ghost {
+    border-color: transparent;
+    color: var(--muted);
+}
+
+#sidebar button,
+#sidebar .button-like {
+    width: 100%;
+}
+
+.hint {
+    color: var(--muted);
+    font-size: 0.85rem;
+    margin: 0.3rem 0;
+    line-height: 1.4;
+}
+
+.status {
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    border: 1px solid;
+}
+
+.status[data-state='valid'] {
+    color: var(--good);
+    border-color: var(--good);
+}
+
+.status[data-state='invalid'] {
+    color: var(--bad);
+    border-color: var(--bad);
+}
+
+.status[data-state='unchecked'] {
+    color: var(--warn);
+    border-color: var(--warn);
+}
+
+.status[data-state='loading'] {
+    color: var(--muted);
+    border-color: var(--line);
+}
+
+#diagram-pane {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-width: 0;
+}
+
+#diagram-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.5rem 0.8rem;
+    border-bottom: 1px solid var(--line);
+    flex-wrap: wrap;
+}
+
+#diagram-controls label {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+#diagram-scroll {
+    flex-grow: 1;
+    overflow: auto;
+}
+
+#diagram {
+    display: block;
+    /* A drag that starts on a cell must not be interpreted as a text selection. */
+    user-select: none;
+    touch-action: none;
+}
+
+.degree-row {
+    fill: transparent;
+    cursor: copy;
+}
+
+.degree-row:hover {
+    fill: rgba(31, 111, 235, 0.06);
+}
+
+.degree-row.drop-target {
+    fill: rgba(31, 111, 235, 0.12);
+}
+
+.degree-label {
+    fill: var(--muted);
+    font-size: 11px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    dominant-baseline: middle;
+    pointer-events: none;
+}
+
+.gridline {
+    stroke: var(--line);
+    stroke-dasharray: 2 4;
+}
+
+.cell {
+    fill: var(--cell);
+    cursor: grab;
+}
+
+.cell.selected {
+    fill: var(--cell-selected);
+}
+
+.cell.implicated {
+    fill: var(--bad);
+}
+
+.cell-label {
+    font-size: 11px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    fill: var(--fg);
+    text-anchor: middle;
+    pointer-events: none;
+}
+
+.arc {
+    fill: none;
+    stroke: var(--fg);
+    stroke-width: 1.4;
+    /* Arcs are decoration: they must never intercept a drag or a click on the row beneath them. */
+    pointer-events: none;
+}
+
+.arc.derived {
+    stroke: var(--muted);
+    stroke-width: 1;
+    stroke-dasharray: 3 3;
+}
+
+.arc-label {
+    font-size: 10px;
+    fill: var(--fg);
+    text-anchor: middle;
+    pointer-events: none;
+}
+
+.arc-label.derived {
+    fill: var(--muted);
+}
+
+.rubber {
+    stroke: var(--accent);
+    stroke-width: 1.4;
+    stroke-dasharray: 4 3;
+    fill: none;
+    pointer-events: none;
+}
+
+.failure {
+    border-left: 3px solid var(--bad);
+    padding: 0.3rem 0.5rem;
+    margin-bottom: 0.5rem;
+    background: var(--panel);
+    font-size: 0.85rem;
+    line-height: 1.4;
+}
+
+.failure code {
+    color: var(--bad);
+}
+
+.notice {
+    border-left: 3px solid var(--warn);
+    padding: 0.3rem 0.5rem;
+    background: var(--panel);
+    font-size: 0.85rem;
+    line-height: 1.4;
+}
+
+output {
+    display: block;
+    margin-top: 0.4rem;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+    word-break: break-word;
+}
+
+output.error {
+    color: var(--bad);
+}
+
+#toast {
+    position: fixed;
+    bottom: 1rem;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: 40rem;
+    padding: 0.5rem 0.9rem;
+    border-radius: 4px;
+    background: var(--fg);
+    color: var(--bg);
+    font-size: 0.9rem;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    z-index: 10;
+}
+
+#toast[data-kind='error'] {
+    background: var(--bad);
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #16181d;
+        --fg: #e6e6e6;
+        --muted: #9aa0a6;
+        --line: #33363d;
+        --panel: #1d2027;
+        --accent: #6aa2ff;
+        --good: #4ac26b;
+        --bad: #ff7b72;
+        --warn: #d4a72c;
+        --cell: #e6e6e6;
+        --cell-selected: #6aa2ff;
+    }
+}
