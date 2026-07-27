@@ -43,6 +43,23 @@ Then build the site into `dist/` and serve it:
 `just all` builds without serving. `wasm-opt` is used to shrink the binary if
 `binaryen` is installed, and skipped otherwise.
 
+*Compute Ext* hands the module to the Adams spectral sequence viewer, which the
+deployed site keeps one level above this page. `just serve` serves the builder
+on its own, so there is nothing above it, and the button says so rather than
+opening a second copy of the builder. To use it locally, build the viewer with
+`just wasm` in `web_ext/sseq_gui` and then either
+
+- reproduce the deployed layout, which needs no query string — link this
+  `dist/` in as `module_builder/` under the viewer's own `dist/` and serve that
+  one directory, reaching the builder at
+  <http://localhost:8080/module_builder/>; or
+- serve the two separately and name the viewer, as in
+  <http://localhost:8081/?viewer=http://localhost:8080/> against that crate's
+  `just serve-wasm`.
+
+A viewer has to be on this origin or on localhost, since the module travels to
+it in the URL.
+
 ## Tests
 
 ```console

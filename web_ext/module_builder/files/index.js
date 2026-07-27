@@ -361,7 +361,7 @@ function renderPanel() {
         setStatus('valid', 'relations hold');
     } else {
         const n = state.failures.length;
-        setStatus('invalid', `${n} relation${n === 1 ? '' : 's'} fail`);
+        setStatus('invalid', `${n} relation${n === 1 ? ' fails' : 's fail'}`);
     }
 
     const relations = document.getElementById('relations');
@@ -841,13 +841,103 @@ function setUpControls() {
                 );
                 return;
             }
-            const json = await call('toJsonCompact');
-            // The spectral sequence viewer is deployed one level up from this page.
-            window.open(
-                `../?module_json=${encodeURIComponent(json)}`,
-                '_blank',
-            );
+            const { url, error } = viewerBase();
+            if (error !== undefined) {
+                showToast(error, 'error');
+                return;
+            }
+            // Together rather than in turn: the tab is opened once both have finished, and the
+            // fewer awaits stand between the click and that call the less likely a popup blocker
+            // is to disown it.
+            const [json, found] = await Promise.all([
+                call('toJsonCompact'),
+                viewerIsThere(url),
+            ]);
+            if (!found) {
+                showToast(
+                    `There is no spectral sequence viewer at ${url.href}. Build and serve ` +
+                        'web_ext/sseq_gui there, or point at one with ?viewer=.',
+                    'error',
+                );
+                return;
+            }
+            const target = new URL(url);
+            target.search = `?module_json=${encodeURIComponent(json)}`;
+            window.open(target.href, '_blank');
         });
+}
+
+/// Hosts that are the machine this page is running on, whatever port they serve.
+function isLoopback(hostname) {
+    return (
+        hostname === 'localhost' ||
+        hostname === '127.0.0.1' ||
+        hostname === '[::1]'
+    );
+}
+
+/// Where the Adams spectral sequence viewer is, or why it cannot be reached.
+///
+/// The deployed site puts this page in `module_builder/` below the viewer, so `../` finds it there.
+/// Serving the builder on its own — which is what `just serve` does — leaves nothing above it, and
+/// `../` then resolves back to this page, so following it just opened a second copy of the builder.
+/// A viewer anywhere else is named with `?viewer=`, which locally means another port and hence
+/// another origin. An override is confined to this origin or a loopback one: the module travels in
+/// the URL, and a link should not be able to post the module you have open to a site of its own
+/// choosing.
+function viewerBase() {
+    const override = new URLSearchParams(window.location.search).get('viewer');
+    if (override !== null) {
+        let url;
+        try {
+            url = new URL(override, window.location.href);
+        } catch (e) {
+            return { error: `The viewer given, ${override}, is not a URL.` };
+        }
+        if (
+            url.origin !== window.location.origin &&
+            !isLoopback(url.hostname)
+        ) {
+            return {
+                error:
+                    `${url.origin} is neither this site nor your own machine, so the module has ` +
+                    'not been sent there. Serve the viewer alongside this page, or on localhost.',
+            };
+        }
+        return { url };
+    }
+
+    const up = new URL('../', window.location.href);
+    if (up.href === new URL('./', window.location.href).href) {
+        return {
+            error:
+                'The viewer is deployed one level above this page, but the builder is being ' +
+                'served on its own, so there is nothing above it to open. Serve the viewer too ' +
+                'and point at it with ?viewer= — for instance ?viewer=http://localhost:8080/ ' +
+                'while `just serve-wasm` runs in web_ext/sseq_gui.',
+        };
+    }
+    return { url: up };
+}
+
+/// Whether the viewer really is at `url`, so that a wrong guess explains itself instead of opening
+/// a blank tab.
+///
+/// Only a viewer on this origin can be checked: a cross-origin request for a static file has no
+/// CORS headers to read, so it fails whether or not the file is there. One named explicitly is
+/// taken on trust in any case.
+async function viewerIsThere(url) {
+    if (url.origin !== window.location.origin) {
+        return true;
+    }
+    try {
+        const response = await fetch(new URL('sseq_gui_wasm.js', url), {
+            method: 'HEAD',
+        });
+        return response.ok;
+    } catch (e) {
+        return false;
+    }
 }
 
 async function copy(text, message) {

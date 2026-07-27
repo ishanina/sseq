@@ -398,12 +398,59 @@ impl Builder {
         let lookup = self.lookup_table();
         for action in actions {
             let action = action.as_ref();
-            module
-                .parse_action(&lookup, action, false)
-                .with_context(|| format!("Failed to parse action: {action}"))?;
+            if self.validate_action(action)? {
+                module
+                    .parse_action(&lookup, action, false)
+                    .with_context(|| format!("Failed to parse action: {action}"))?;
+            }
         }
         self.harvest(&module);
         Ok(())
+    }
+
+    /// Reject an action line that [`FDModule::parse_action`] would either panic on or accept only
+    /// for [`Self::harvest`] to discard.
+    ///
+    /// `parse_action` writes the row of any admissible operation, but only the generator actions
+    /// are free parameters and `harvest` reads back nothing else, so a non-generator line would
+    /// vanish without a word. It also indexes the output degree before looking at the right-hand
+    /// side, which panics — and in wasm leaves the builder unusable — when that degree carries no
+    /// basis element. Returns `Ok(false)` for a line that is fine but stores nothing (an explicit
+    /// zero into an empty degree), which the caller must then skip rather than parse.
+    ///
+    /// A line this cannot even take apart is `Ok(true)`: `parse_action` reports those, keeping a
+    /// single source of truth for the syntax errors.
+    fn validate_action(&self, action: &str) -> anyhow::Result<bool> {
+        let Some((lhs, rhs)) = action.split_once(" = ") else {
+            return Ok(true);
+        };
+        let Some((op, source)) = lhs.trim().rsplit_once(' ') else {
+            return Ok(true);
+        };
+        let op = op.trim();
+        let Some((op_degree, op_idx)) = self.algebra.basis_element_from_string(op) else {
+            return Ok(true);
+        };
+        ensure!(
+            self.generator_index(op_degree) == Some(op_idx),
+            "{op} is not an algebra generator, so its action is determined by the generator \
+             actions rather than free. At the prime {} the generators are {}.",
+            self.p,
+            self.generator_description(),
+        );
+        let Some((source_degree, _)) = self.lookup(source.trim()) else {
+            return Ok(true);
+        };
+        if self.dimension(source_degree + op_degree) == 0 {
+            ensure!(
+                rhs.trim() == "0",
+                "{op} {} lands in degree {}, which has no basis element, so it can only be 0",
+                source.trim(),
+                source_degree + op_degree,
+            );
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     /// Trim degrees that no longer carry a basis element off either end.
@@ -1565,6 +1612,38 @@ mod tests {
         assert!(builder.set_actions_text("Sq1 x0").is_err());
         // A degree mismatch is caught by the library parser.
         assert!(builder.set_actions_text("Sq1 x0 = x3").is_err());
+    }
+
+    /// Lines `FDModule::parse_action` would panic on or silently discard must be errors instead:
+    /// a panic in wasm leaves the builder unusable for every later command.
+    #[test]
+    fn actions_text_rejects_what_parse_action_cannot_take() {
+        // Cells in degrees 0, 1, 2 only.
+        let mut builder = Builder::new(p2());
+        for degree in 0..=2 {
+            builder.add_generator(degree, None).unwrap();
+        }
+
+        // Sq3 is admissible but not a generator; `harvest` would drop it silently.
+        let err = builder.set_actions_text("Sq3 x0 = x2").unwrap_err();
+        assert!(
+            err.to_string().contains("not an algebra generator"),
+            "{err}"
+        );
+
+        // Sq4 is a generator, but its output degree has no basis element; `parse_action`
+        // indexes that degree before reading the right-hand side, which panics.
+        let err = builder.set_actions_text("Sq4 x0 = x2").unwrap_err();
+        assert!(err.to_string().contains("no basis element"), "{err}");
+
+        // An explicit zero into an empty degree is fine, and stores nothing.
+        builder.set_actions_text("Sq4 x0 = 0").unwrap();
+        assert_eq!(builder.to_json()["actions"], json!([]));
+
+        // A failed set_actions_text must leave the actions as they were.
+        builder.set_actions_text("Sq1 x0 = x1").unwrap();
+        assert!(builder.set_actions_text("Sq3 x0 = x2").is_err());
+        assert_eq!(builder.to_json()["actions"], json!(["Sq1 x0 = x1"]));
     }
 
     #[test]

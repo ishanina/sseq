@@ -481,7 +481,9 @@ single quotes).
   per degree with the differentials shown between them, and the ability to drill
   into any single module.
 - **"Compute Ext"** links to `../?module_json=...`, opening the object in
-  `sseq_gui`.
+  `sseq_gui`, which is where the deployed site puts it. That is not where it is
+  when the builder is served on its own, so the page checks that a viewer is
+  really there and takes `?viewer=` for one served elsewhere.
 
 ## Build, CI, deployment
 

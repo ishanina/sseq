@@ -74,8 +74,23 @@ wasm-bindgen-step: wasm-lib
     wasm-bindgen --no-typescript --target no-modules --out-dir {{WASM_OUT}} --out-name {{NAME}}_wasm {{WASM_LIB}}
     wasm-opt -O3 {{WASM_FILE}} -o {{WASM_FILE}} || true
 
+# Every build writes the same file names, and `http.server` sends `Last-Modified` but no
+# `Cache-Control`, which leaves a browser free to keep using its copy without ever asking. The page
+# then goes on running the previous build, which is indistinguishable from a change not working.
 serve: all
-    python3 -m http.server --directory {{WASM_OUT}} 8081
+    #!/usr/bin/env python3
+    import http.server
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory="{{WASM_OUT}}", **kwargs)
+
+        def end_headers(self):
+            self.send_header("Cache-Control", "no-store")
+            super().end_headers()
+
+    print("Serving {{WASM_OUT}} on http://localhost:8081/ ...")
+    http.server.ThreadingHTTPServer(("", 8081), Handler).serve_forever()
 
 clean:
     rm -rf {{WASM_OUT}} target

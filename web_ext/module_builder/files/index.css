@@ -64,6 +64,9 @@ main {
     grid-template-columns: 15rem minmax(0, 1fr) 21rem;
     align-items: start;
     height: calc(100vh - 3rem);
+    /* The sidebar and panel columns are fixed; in a window narrower than their sum the diagram
+       column would collapse to nothing and the panes would paint over each other. Scroll instead. */
+    min-width: 56rem;
 }
 
 #sidebar,
@@ -267,6 +270,9 @@ button:disabled:hover {
 .gridline {
     stroke: var(--line);
     stroke-dasharray: 2 4;
+    /* The gridline runs along the middle of the row, exactly where clicks to add a cell land, and a
+       stroke swallows hits on its dashes. Like the arcs, it is decoration and must not intercept. */
+    pointer-events: none;
 }
 
 .cell {
