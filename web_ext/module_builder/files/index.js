@@ -1017,6 +1017,57 @@ function setUpOperations() {
     document.getElementById('op-sum').addEventListener('click', () => {
         withOperand(json => run('directSum', { other: json }));
     });
+
+    document.getElementById('op-extensions').addEventListener('click', () => {
+        withOperand(async json => {
+            const raw = document.getElementById('extension-class').value.trim();
+            let dimension;
+            try {
+                dimension = await call('countExtensions', { sub: json });
+            } catch (e) {
+                showToast(e.message, 'error');
+                return;
+            }
+            if (dimension === 0) {
+                showToast(
+                    'Ext\u00b9 is zero here, so the only extension is the split one — the direct sum.',
+                );
+                return;
+            }
+            if (raw === '') {
+                showToast(
+                    `Ext\u00b9 has dimension ${dimension}. Enter ${dimension} ` +
+                        `coefficient${
+                            dimension === 1 ? '' : 's'
+                        } beside the button to build one, ` +
+                        `for instance ${Array.from(
+                            { length: dimension },
+                            (_, i) => (i === 0 ? 1 : 0),
+                        ).join(',')}.`,
+                );
+                return;
+            }
+            const coefficients = raw.split(/[\s,]+/).map(Number);
+            if (coefficients.some(c => !Number.isInteger(c) || c < 0)) {
+                showToast(
+                    'Coefficients must be non-negative whole numbers.',
+                    'error',
+                );
+                return;
+            }
+            if (coefficients.length !== dimension) {
+                showToast(
+                    `Ext\u00b9 has dimension ${dimension}, so give ${dimension} ` +
+                        `coefficient${dimension === 1 ? '' : 's'}, not ${
+                            coefficients.length
+                        }.`,
+                    'error',
+                );
+                return;
+            }
+            await run('applyExtension', { sub: json, coefficients });
+        });
+    });
 }
 
 /// Call `f` with the selection as the flat `[degree, idx, ...]` list the worker expects.
@@ -1047,6 +1098,27 @@ async function withOperand(f) {
         // to the file name the way opening a module does.
         if (spec.name === undefined) {
             spec.name = name;
+        }
+        const shift = Number.parseInt(
+            document.getElementById('operand-shift').value,
+            10,
+        );
+        if (Number.isNaN(shift)) {
+            showToast('The operand shift must be a whole number.', 'error');
+            return;
+        }
+        if (shift !== 0) {
+            // Suspension is just a re-grading of the basis, and the actions refer to generators by
+            // name, so shifting the file is exactly shifting the module. Extensions by a shifted
+            // module are the interesting ones, since a class needs the submodule above the quotient.
+            spec.gens = Object.fromEntries(
+                Object.entries(spec.gens ?? {}).map(([n, d]) => [n, d + shift]),
+            );
+            spec.name = `${spec.name}[${shift}]`;
+            // A cofibre or self map is stated in the unshifted degrees, so it no longer applies.
+            for (const field of ['cofiber', 'self_maps', 'products', 'shift']) {
+                delete spec[field];
+            }
         }
         await f(JSON.stringify(spec));
     } catch (e) {

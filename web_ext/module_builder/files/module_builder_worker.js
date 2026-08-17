@@ -86,6 +86,15 @@ const commands = {
     quotient: ({ cells }) => ({
         state: requireBuilder().quotient(new Int32Array(cells)),
     }),
+    countExtensions: ({ sub }) => ({
+        value: requireBuilder().count_extensions(sub),
+    }),
+    applyExtension: ({ sub, coefficients }) => ({
+        state: requireBuilder().apply_extension(
+            sub,
+            new Uint32Array(coefficients),
+        ),
+    }),
     evaluate: ({ expr }) => ({ value: requireBuilder().evaluate(expr) }),
     toJson: () => ({ value: requireBuilder().to_json() }),
     toJsonCompact: () => ({ value: requireBuilder().to_json_compact() }),

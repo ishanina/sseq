@@ -11,8 +11,17 @@ draw are the $Sq^{2^k}$, and at an odd prime they are the Bockstein $\beta$ and
 the $P^{p^k}$.
 
 Operations: shift, dualise, truncate, tensor, direct sum, the submodule generated
-by a selection of cells, and the quotient by it. They replace the open module, and
-there is an undo stack.
+by a selection of cells, the quotient by it, and extensions. They replace the open
+module, and there is an undo stack.
+
+*extensions by it* enumerates the modules $M$ fitting into $0 \to N \to M \to Q
+\to 0$, where $Q$ is the open module and $N$ the one chosen beside it, and builds
+the one you pick. These are classified by $\Ext^1_A(Q, N)$, computed by linear
+algebra rather than by resolving anything: the only unknown is the component
+$Q \to N$ of each generator's action, no composite of actions can use it twice,
+so the Adem relations are linear in it. A class needs $N$ to sit above $Q$, which
+is what the operand's *shifted by* box is for — extending the sphere by its own
+suspension gives $C(2)$, and by $\Sigma^2$ of it gives $C(\eta)$.
 
 The dual uses the antipode $\chi$ of the Steenrod algebra rather than a plain
 transpose. Transposing the action gives a module over $A^{\mathrm{op}}$, which is

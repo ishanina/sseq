@@ -4,7 +4,8 @@ An interactive web interface for building modules over the Steenrod algebra, and
 more generally bounded chain complexes of such ("derived modules"), producing
 files that are drop-in compatible with `ext/steenrod_modules/`.
 
-This document is the plan. Phases 1 and 2 are implemented; phases 3 and 4 are
+This document is the plan. Phases 1 and 2 are implemented, and phase 3a — the
+$\Ext^1$ extension enumeration — with it; the rest of phase 3 and phase 4 are
 not. See the [Phasing](#phasing) section at the end for what that covers, and
 `README.md` for how to build and run what exists.
 
@@ -528,10 +529,13 @@ section of `sseq_gui`'s `index.html`.
 2. **Module operations — done.** Shift, dual, truncate, direct sum, tensor,
    submodule, quotient, plus the antipode they rest on. Multi-cell selection and
    an undo stack came with them, since the operations are destructive.
-3. **Derived modules.** Complexes as the native object, cone and fibre,
-   cohomology, the new file format; $\Ext^1$ enumeration by linear algebra;
-   then resolution-backed $\Ext^i(X, Y)$ charts and cofibre/fibre of a chosen
-   class via Yoneda.
+3. **Derived modules.** In three parts:
+   - **a — done.** $\Ext^1$ enumeration by linear algebra, and building the
+     extension it picks out.
+   - **b.** Complexes as the native object, cone and fibre, cohomology, and the
+     new file format.
+   - **c.** Resolution-backed $\Ext^i(X, Y)$ charts and the cofibre or fibre of a
+     chosen class, via Yoneda.
 4. **Polish.** Remaining tests, further documentation.
 
 Phases 1 and 2 are self-contained and useful on their own, and neither depends
@@ -586,3 +590,29 @@ The destructive nature of the operations also forced two interface changes that
 were not in the original plan: selection became a *set* of cells, since submodule
 and quotient act on a set, and an undo stack was added, since a mis-clicked
 `dualise` would otherwise lose work.
+
+### What phase 3a changed
+
+The $\Ext^1$ computation went in as `src/extension.rs`, working on `FDModule`s
+rather than on `Builder`s so that it needs none of the builder's internals.
+
+The linearity argument in the plan held up, and the implementation leans on it
+twice: $F$ is evaluated one elementary $\theta$ at a time to get its matrix, and
+the split extension is used as the check that $F(0) = 0$, i.e. that $F$ really is
+linear rather than merely affine. Relation *values* rather than relation
+*failures* were needed, so there is a small vector-valued twin of
+`check_validity` in that file; the string-producing one in the algebra crate
+cannot serve, since the linear algebra needs coordinates.
+
+One interface gap only showed up in the browser: a class needs the submodule to
+sit above the quotient, and the operand picker offered library modules
+unshifted, so every pair a user could reach had $\Ext^1 = 0$. The operand now
+takes a shift. Suspending a file is just adding to each degree in `gens`, since
+actions name their generators, so this is done in the page rather than in the
+wasm — though it does have to drop `cofiber`, `self_maps` and `products`, which
+are stated in the unshifted degrees.
+
+The result reproduces the $h_i$: extending the sphere by its own suspension
+$\Sigma^t S$ gives $\Ext^1$ of dimension 1 exactly when $t$ is a generator
+degree — 1, 2, 4, 8 and not 3, 5 or 6 — and the non-split extensions in degrees
+1 and 2 are $C(2)$ and $C(\eta)$ on the nose.
