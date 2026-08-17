@@ -73,6 +73,18 @@
                 Sq<sup>3</sup>Sq<sup>1</sup>.
             </p>
             <p>
+                <strong>Extensions.</strong> <em>extensions by it</em> counts
+                the modules M fitting into 0 → N → M → Q → 0, where Q is the
+                open module and N is the one chosen beside it. Those are
+                classified by Ext<sup>1</sup>(Q, N), which is computed here by
+                linear algebra rather than by resolving anything: the unknown is
+                the component Q → N of each generator's action, no composite can
+                use it twice, so the Adem relations are linear in it. Enter
+                coefficients for the resulting basis — <code>1</code>, or
+                <code>1,0,1</code> — to build one; all zeroes is the split
+                extension.
+            </p>
+            <p>
                 <strong>Modules over a subalgebra.</strong> A file with a
                 <code>profile</code> field, such as <code>tmf2</code> or
                 <code>ko</code>, is a module over a sub-Hopf-algebra rather than
@@ -219,11 +231,31 @@
                             >with
                             <select id="operand"></select>
                         </label>
+                        <label
+                            >shifted by
+                            <input
+                                type="number"
+                                id="operand-shift"
+                                value="0"
+                                title="Suspend the chosen module before using it. Extensions by a shifted module are the interesting ones: the sphere extended by its own suspension is C(2)."
+                            />
+                        </label>
                         <span class="row">
                             <button type="button" id="op-tensor">tensor</button>
                             <button type="button" id="op-sum">
                                 direct sum
                             </button>
+                        </span>
+                        <span class="row">
+                            <button type="button" id="op-extensions">
+                                extensions by it
+                            </button>
+                            <input
+                                type="text"
+                                id="extension-class"
+                                placeholder="class"
+                                title="Coefficients for the basis of Ext^1, e.g. 1 or 1,0,1"
+                            />
                         </span>
                     </div>
                     <p class="hint">

@@ -9,6 +9,7 @@ use fp::prime::{Prime, ValidPrime};
 use wasm_bindgen::prelude::*;
 
 pub mod builder;
+pub mod extension;
 
 use builder::Builder;
 
@@ -198,6 +199,29 @@ impl ModuleBuilder {
     pub fn quotient(&mut self, cells: Vec<i32>) -> Result<String, JsValue> {
         let cells = parse_cells(&cells)?;
         self.0.quotient(&cells).map_err(to_js)?;
+        Ok(self.state())
+    }
+
+    /// How many independent extensions of this module by `sub` there are, i.e. the dimension of
+    /// $\Ext^1(M, \mathrm{sub})$, without building any of them.
+    pub fn count_extensions(&self, sub: &str) -> Result<usize, JsValue> {
+        let sub = Builder::from_json(&parse(sub)?).map_err(to_js)?;
+        self.0
+            .extensions(&sub)
+            .map(|extensions| extensions.dimension())
+            .map_err(to_js)
+    }
+
+    /// Replace the module by the extension of it by `sub` picked out by `coefficients`.
+    ///
+    /// All-zero coefficients give the split extension, which is the direct sum.
+    pub fn apply_extension(
+        &mut self,
+        sub: &str,
+        coefficients: Vec<u32>,
+    ) -> Result<String, JsValue> {
+        let sub = Builder::from_json(&parse(sub)?).map_err(to_js)?;
+        self.0.apply_extension(&sub, &coefficients).map_err(to_js)?;
         Ok(self.state())
     }
 }

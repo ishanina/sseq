@@ -31,6 +31,8 @@ use fp::{
 };
 use serde_json::{Map, Value, json};
 
+use crate::extension::Extensions;
+
 /// The json fields the builder owns. Every other field of a loaded file is preserved verbatim so
 /// that `profile`, `products`, `self_maps`, `shift` and `cofiber` survive a load and save cycle.
 const OWNED_FIELDS: [&str; 5] = ["p", "type", "gens", "actions", "name"];
@@ -976,6 +978,45 @@ impl Builder {
 
         let name = decorate_name(&self.name, |name| format!("{name}/sub"));
         self.replace_with(&quotient, name);
+        Ok(())
+    }
+
+    /// The extensions of this module by `sub`, i.e. the modules $M$ fitting into
+    ///
+    /// $$ 0 \to \mathrm{sub} \to M \to \mathrm{self} \to 0. $$
+    ///
+    /// See [`crate::extension`] for how they are enumerated.
+    pub fn extensions(&self, sub: &Self) -> anyhow::Result<Extensions> {
+        ensure!(
+            self.p == sub.p,
+            "Cannot extend a module at the prime {} by one at the prime {}",
+            self.p,
+            sub.p
+        );
+        self.require_unrestricted("form an extension")?;
+        sub.require_unrestricted("form an extension")?;
+
+        let (quotient, quotient_failures) = self.build();
+        let (submodule, sub_failures) = sub.build();
+        ensure!(
+            quotient_failures.is_empty(),
+            "This module does not satisfy the Adem relations yet, so it has no extensions"
+        );
+        ensure!(
+            sub_failures.is_empty(),
+            "The submodule does not satisfy the Adem relations yet, so it has no extensions"
+        );
+        crate::extension::compute(Arc::clone(&self.algebra), submodule, quotient)
+    }
+
+    /// Replace this module by the extension of it by `sub` given by `coefficients`.
+    ///
+    /// All-zero coefficients give the split extension, which is the direct sum.
+    pub fn apply_extension(&mut self, sub: &Self, coefficients: &[u32]) -> anyhow::Result<()> {
+        let extensions = self.extensions(sub)?;
+        let module = extensions.realise(coefficients)?;
+        let name = combine_names(&sub.name, &self.name, " . ");
+        self.replace_with(&module, name);
         Ok(())
     }
 
